@@ -1,0 +1,350 @@
+/* Profile Panel - Slides in from the left over the sidebar */
+.profile-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.25);
+  backdrop-filter: blur(4px);
+  z-index: 200;
+  display: flex;
+  align-items: flex-start;
+  animation: overlayFadeIn 0.2s ease;
+}
+
+@keyframes overlayFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.profile-panel {
+  width: 320px;
+  height: 100vh;
+  background: var(--panel-bg, #ffffff);
+  border-right: 1px solid var(--border, #e5e7eb);
+  display: flex;
+  flex-direction: column;
+  padding: 1.4rem 1.2rem;
+  box-sizing: border-box;
+  overflow-y: auto;
+  gap: 1.1rem;
+  animation: slidePanelIn 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow: 4px 0 30px rgba(0, 0, 0, 0.1);
+}
+
+@keyframes slidePanelIn {
+  from { transform: translateX(-100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+/* Dark mode panel */
+.dark-mode .profile-panel {
+  background: #1a1d27;
+  border-right-color: #2d3148;
+  box-shadow: 4px 0 30px rgba(0, 0, 0, 0.4);
+}
+
+/* Header */
+.profile-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.profile-panel-title {
+  font-family: 'Outfit', sans-serif;
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--text-primary, #111827);
+}
+
+.dark-mode .profile-panel-title {
+  color: #f1f5f9;
+}
+
+.profile-close-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted, #9ca3af);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  transition: color 0.15s, background 0.15s;
+}
+
+.profile-close-btn:hover {
+  color: var(--text-primary, #111827);
+  background: var(--hover-bg, #f3f4f6);
+}
+
+/* Hero avatar */
+.profile-hero {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem;
+  background: var(--card-bg, #f9fafb);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 14px;
+}
+
+.dark-mode .profile-hero {
+  background: #22263a;
+  border-color: #2d3148;
+}
+
+.profile-avatar-ring {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.profile-avatar-lg {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  border: 2.5px solid #e5e7eb;
+  background: #f3f4f6;
+}
+
+.profile-online-dot {
+  position: absolute;
+  bottom: 1px;
+  right: 1px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #22c55e;
+  border: 2px solid #ffffff;
+}
+
+.dark-mode .profile-online-dot {
+  border-color: #22263a;
+}
+
+.profile-hero-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.profile-display-name {
+  font-family: 'Outfit', sans-serif;
+  font-size: 1.1rem;
+  font-weight: 800;
+  color: var(--text-primary, #111827);
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dark-mode .profile-display-name {
+  color: #f1f5f9;
+}
+
+.profile-role-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.2rem 0.5rem;
+  border-radius: 999px;
+}
+
+.profile-role-badge.real {
+  background: #f0fdf4;
+  color: #16a34a;
+  border: 1px solid #bbf7d0;
+}
+
+.profile-role-badge.demo {
+  background: #fef3c7;
+  color: #d97706;
+  border: 1px solid #fcd34d;
+}
+
+/* Info Cards */
+.profile-info-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.profile-info-card {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.65rem 0.85rem;
+  background: var(--card-bg, #f9fafb);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 10px;
+}
+
+.dark-mode .profile-info-card {
+  background: #22263a;
+  border-color: #2d3148;
+}
+
+.info-card-icon {
+  color: #6b7280;
+  flex-shrink: 0;
+}
+
+.dark-mode .info-card-icon {
+  color: #818cf8;
+}
+
+.profile-info-card > div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.info-card-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: #9ca3af;
+  letter-spacing: 0.04em;
+}
+
+.info-card-value {
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text-primary, #111827);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dark-mode .info-card-value {
+  color: #e2e8f0;
+}
+
+.uid-val {
+  font-family: 'Space Grotesk', monospace;
+  font-size: 0.75rem;
+  color: #6b7280;
+}
+
+/* Stats Row */
+.profile-stats-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  padding: 0.9rem 0.6rem;
+  background: var(--card-bg, #f9fafb);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 12px;
+}
+
+.dark-mode .profile-stats-row {
+  background: #22263a;
+  border-color: #2d3148;
+}
+
+.profile-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+}
+
+.stat-icon {
+  color: #6366f1;
+  margin-bottom: 0.1rem;
+}
+
+.stat-number {
+  font-family: 'Outfit', sans-serif;
+  font-size: 1.4rem;
+  font-weight: 800;
+  color: var(--text-primary, #111827);
+  line-height: 1;
+}
+
+.dark-mode .stat-number {
+  color: #f1f5f9;
+}
+
+.stat-label {
+  font-size: 0.68rem;
+  color: #9ca3af;
+  text-align: center;
+}
+
+.profile-stat-divider {
+  width: 1px;
+  height: 36px;
+  background: var(--border, #e5e7eb);
+}
+
+.dark-mode .profile-stat-divider {
+  background: #2d3148;
+}
+
+/* Firebase status */
+.profile-firebase-status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.76rem;
+  color: #9ca3af;
+  padding: 0.5rem 0.8rem;
+  background: var(--card-bg, #f9fafb);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 8px;
+}
+
+.dark-mode .profile-firebase-status {
+  background: #1a1d27;
+  border-color: #2d3148;
+}
+
+.firebase-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.firebase-dot.online { background: #22c55e; }
+.firebase-dot.offline { background: #f59e0b; }
+
+/* Logout */
+.profile-logout-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.75rem;
+  background: transparent;
+  border: 1px solid #fca5a5;
+  border-radius: 10px;
+  color: #ef4444;
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  margin-top: auto;
+}
+
+.profile-logout-btn:hover {
+  background: #fef2f2;
+  border-color: #ef4444;
+}
+
+.dark-mode .profile-logout-btn {
+  border-color: #7f1d1d;
+  color: #fca5a5;
+}
+
+.dark-mode .profile-logout-btn:hover {
+  background: rgba(239, 68, 68, 0.1);
+}
