@@ -33,6 +33,7 @@ import {
   submitQueryToFirebase,
   listenForQueryResult,
 } from '../firebase/firebaseConfig';
+import StarField from './StarField';
 import './SatQueryWorkspace.css';
 
 // ─── Preset Datasets (demo / offline fallback) ───────────────────────────────
@@ -642,6 +643,7 @@ export default function SatQueryWorkspace({ user, onLogout }) {
 
       {/* ─── MAIN WORKSPACE ───────────────────────────────────────────── */}
       <main className="workspace-main" onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}>
+        <StarField />
         <div className="workspace-content-center">
 
           {/* Center input zone */}
