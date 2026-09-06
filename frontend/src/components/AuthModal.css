@@ -280,3 +280,42 @@
   font-size: 0.72rem;
   color: #64748b;
 }
+
+/* ─── Mobile Responsive ─── */
+@media (max-width: 480px) {
+  .auth-overlay {
+    padding: 0;
+    align-items: flex-end;
+  }
+
+  .auth-card {
+    border-radius: 20px 20px 0 0;
+    max-width: 100%;
+    padding: 1.8rem 1.4rem 2rem;
+    /* Safe area for home indicator */
+    padding-bottom: calc(1.8rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  .auth-title {
+    font-size: 1.3rem;
+  }
+
+  .input-box {
+    padding: 0.7rem 0.9rem;
+  }
+
+  .input-box input {
+    font-size: 1rem; /* prevents iOS zoom on focus */
+  }
+
+  .google-sign-in-btn {
+    padding: 0.85rem;
+    font-size: 1rem;
+  }
+
+  .auth-submit-btn {
+    padding: 0.9rem;
+    font-size: 1rem;
+  }
+}
+

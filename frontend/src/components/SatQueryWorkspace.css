@@ -40,6 +40,13 @@
   font-family: 'Plus Jakarta Sans', sans-serif;
 }
 
+/* Mobile-only elements — hidden on desktop */
+.mobile-topbar          { display: none; }
+.hamburger-btn          { display: none; }
+.mobile-sidebar-overlay { display: none; }
+.sidebar-mobile-close   { display: none; }
+
+
 /* =========================================
    LEFT SIDEBAR
    ========================================= */
@@ -1141,17 +1148,294 @@
 }
 
 @media (max-width: 840px) {
-  .workspace-layout {
-    flex-direction: column;
-  }
+  /* Sidebar becomes a slide-in drawer */
   .workspace-sidebar {
-    width: 100%;
-    min-width: 100%;
-    max-height: 180px;
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 100vh;
+    width: 280px;
+    min-width: 280px;
+    z-index: 300;
+    transform: translateX(-100%);
+    transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    box-shadow: 4px 0 30px rgba(0, 0, 0, 0.5);
+    overflow-y: auto;
+  }
+
+  .workspace-sidebar.sidebar-open {
+    transform: translateX(0);
+  }
+
+  /* Mobile overlay backdrop */
+  .mobile-sidebar-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(4px);
+    z-index: 299;
+    animation: fadeIn 0.2s ease;
+  }
+
+  /* Mobile topbar — always visible on small screens */
+  .mobile-topbar {
+    display: flex !important;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.7rem 1rem;
+    background: var(--space-sidebar);
+    border-bottom: 1px solid var(--space-border);
+    flex-shrink: 0;
+    position: relative;
+    z-index: 10;
+  }
+
+  .hamburger-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    background: var(--space-surface);
+    border: 1px solid var(--space-border);
+    border-radius: 8px;
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.2s;
+  }
+
+  .hamburger-btn:hover {
+    background: var(--space-surface-hover);
+    border-color: var(--accent-blue);
+    color: var(--accent-blue);
+  }
+
+  .mobile-topbar-brand {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 1.2rem;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+    background: linear-gradient(135deg, #ffffff 0%, #38bdf8 60%, #818cf8 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  /* Show close button inside sidebar on mobile */
+  .sidebar-mobile-close {
+    display: flex !important;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    background: var(--space-surface-hover);
+    border: 1px solid var(--space-border);
+    border-radius: 6px;
+    color: var(--text-muted);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: color 0.15s, background 0.15s;
+  }
+
+  .sidebar-mobile-close:hover {
+    color: var(--text-primary);
+    background: var(--space-surface);
+  }
+
+  .sidebar-top {
     flex-direction: row;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+    padding: 0 0.3rem;
+  }
+
+  .sidebar-brand {
+    flex: 1;
+  }
+
+  .new-analysis-btn {
+    width: auto;
+    flex-shrink: 0;
+  }
+
+  /* Main area takes full width */
+  .workspace-main {
+    width: 100%;
+    height: 100%;
+  }
+
+  /* Content padding tighter */
+  .workspace-content-center {
+    padding: 1rem 1rem;
+  }
+
+  /* Query box full width */
+  .center-input-zone {
+    max-width: 100%;
+  }
+
+  /* Status pipeline — smaller dots */
+  .status-pipeline-steps {
+    padding: 0.6rem 0.8rem;
+  }
+
+  .step-dot {
+    width: 22px;
+    height: 22px;
+  }
+
+  .step-label {
+    font-size: 0.62rem;
+  }
+
+  /* Result tabs — scroll on overflow */
+  .result-tabs-nav {
     overflow-x: auto;
+    flex-wrap: nowrap;
+    gap: 0;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+
+  .result-tabs-nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .tab-btn {
+    white-space: nowrap;
+    font-size: 0.78rem;
+    padding: 0.5rem 0.65rem;
+  }
+
+  /* Metrics grid — 2 cols on tablet */
+  .metrics-row {
+    gap: 0.5rem;
+  }
+
+  .metric-chip {
+    min-width: 100px;
+  }
+
+  /* Upload modal full-width */
+  .upload-options-card {
+    max-width: 100%;
+    border-radius: 12px;
+  }
+
+  /* Options grid 2 cols */
+  .options-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  /* Analysis result max-width relaxed */
+  .analysis-result-below {
+    max-width: 100%;
+  }
+
+  /* Text report padding */
+  .text-report-pane {
+    padding: 1rem;
+    font-size: 0.88rem;
   }
 }
+
+/* ─── Small phones (≤480px) ─── */
+@media (max-width: 480px) {
+  .workspace-sidebar {
+    width: 100vw;
+    min-width: 100vw;
+  }
+
+  .workspace-content-center {
+    padding: 0.75rem 0.75rem;
+  }
+
+  .welcome-title {
+    font-size: 1.35rem;
+  }
+
+  /* Query input bar — icon shrink */
+  .add-media-btn,
+  .send-query-btn,
+  .mic-btn {
+    width: 32px;
+    height: 32px;
+    flex-shrink: 0;
+  }
+
+  .query-text-input {
+    font-size: 0.88rem;
+  }
+
+  /* Preset chips — 2 per row */
+  .quick-presets-row {
+    gap: 0.35rem;
+  }
+
+  .preset-chip {
+    font-size: 0.72rem;
+    padding: 0.35rem 0.6rem;
+  }
+
+  /* Pipeline bar labels hidden on tiny screens */
+  .step-label {
+    display: none;
+  }
+
+  .status-pipeline-steps {
+    padding: 0.5rem 0.5rem;
+  }
+
+  /* Metrics — 1 col on very small screens */
+  .metrics-row {
+    flex-direction: column;
+  }
+
+  .metric-chip {
+    min-width: unset;
+    width: 100%;
+  }
+
+  /* Options grid 1 col */
+  .options-grid {
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+  }
+
+  /* Bitemporal slider — hide labels on tiny */
+  .split-label {
+    font-size: 0.62rem;
+    padding: 0.2rem 0.4rem;
+  }
+
+  /* Tab buttons even smaller */
+  .tab-btn {
+    font-size: 0.72rem;
+    padding: 0.45rem 0.5rem;
+  }
+
+  /* Chip thumbnails */
+  .chip-thumbnail {
+    width: 20px;
+    height: 20px;
+  }
+
+  .chip-name {
+    max-width: 80px;
+  }
+
+  /* User footer in sidebar stacked */
+  .sidebar-user-footer {
+    padding-top: 0.5rem;
+  }
+
+  /* Demo notice wrap */
+  .demo-notice {
+    flex-wrap: wrap;
+    font-size: 0.76rem;
+  }
+}
+
 
 /* =========================================
    STATUS PIPELINE BAR

@@ -23,6 +23,8 @@ import {
   WifiOff,
   Mic,
   MicOff,
+  Menu,
+  X,
 } from 'lucide-react';
 import {
   saveRecentQuery,
@@ -147,6 +149,7 @@ export default function SatQueryWorkspace({ user, onLogout }) {
   const [hoveredRecent, setHoveredRecent]   = useState(null);
   const [selectedRecentId, setSelectedRecentId] = useState(null);
   const [isListening, setIsListening]       = useState(false);
+  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
 
   const fileInputRef     = useRef(null);
   const unsubListenerRef = useRef(null);   // Firebase listener cleanup
@@ -291,6 +294,7 @@ export default function SatQueryWorkspace({ user, onLogout }) {
     setQueryStatus(null);
     setQueryError(null);
     setSelectedRecentId(item.id);
+    setIsMobileSidebarOpen(false); // close drawer on mobile after selection
   };
 
   const handleDeleteRecent = async (e, id) => {
@@ -529,12 +533,24 @@ export default function SatQueryWorkspace({ user, onLogout }) {
 
   return (
     <div className="workspace-layout">
+      {/* ─── MOBILE SIDEBAR OVERLAY ────────────────────────────────────── */}
+      {isMobileSidebarOpen && (
+        <div className="mobile-sidebar-overlay" onClick={() => setIsMobileSidebarOpen(false)} />
+      )}
+
       {/* ─── LEFT SIDEBAR ─────────────────────────────────────────────── */}
-      <aside className="workspace-sidebar">
+      <aside className={`workspace-sidebar${isMobileSidebarOpen ? ' sidebar-open' : ''}`}>
         <div className="sidebar-top">
           <div className="sidebar-brand">
             <span className="sidebar-brand-text">ByteX</span>
           </div>
+          <button
+            className="sidebar-mobile-close"
+            onClick={() => setIsMobileSidebarOpen(false)}
+            aria-label="Close sidebar"
+          >
+            <X size={18} />
+          </button>
           <button className="new-analysis-btn" onClick={handleNewAnalysis}>
             <Plus size={18} />
             <span>New analysis</span>
@@ -643,6 +659,19 @@ export default function SatQueryWorkspace({ user, onLogout }) {
 
       {/* ─── MAIN WORKSPACE ───────────────────────────────────────────── */}
       <main className="workspace-main" onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}>
+        {/* Mobile top bar */}
+        <div className="mobile-topbar">
+          <button
+            className="hamburger-btn"
+            onClick={() => setIsMobileSidebarOpen(true)}
+            aria-label="Open sidebar"
+          >
+            <Menu size={22} />
+          </button>
+          <span className="mobile-topbar-brand">ByteX</span>
+          <div style={{ width: 36 }} />
+        </div>
+
         <StarField />
         <div className="workspace-content-center">
 

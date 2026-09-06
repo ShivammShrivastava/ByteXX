@@ -88,3 +88,32 @@ html, body {
   background-color: #212121;
   box-shadow: 0 -80px 120px 40px rgba(33, 33, 33, 0.98);
 }
+
+/* ─── Mobile: shorten the scroll journey ─── */
+@media (max-width: 768px) {
+  .app-root {
+    /* Shorter scroll distance on mobile — less travel to reach workspace */
+    min-height: 220vh;
+  }
+
+  .horizon-transition-buffer {
+    height: 70vh;
+  }
+
+  .workspace-scroll-section {
+    /* Allow workspace to grow beyond 100vh on mobile so content isn't clipped */
+    height: auto;
+    min-height: 100vh;
+  }
+}
+
+@media (max-width: 480px) {
+  .app-root {
+    min-height: 190vh;
+  }
+
+  .horizon-transition-buffer {
+    height: 50vh;
+  }
+}
+

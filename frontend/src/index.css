@@ -13,6 +13,11 @@ html, body {
   font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  /* Prevent horizontal scroll on all screen sizes */
+  overflow-x: hidden;
+  /* Prevent text inflation on orientation change (iOS) */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 #root {
@@ -25,9 +30,12 @@ html, body {
 
 input, button, textarea, select {
   font-family: inherit;
+  /* Ensure tap targets are comfortable */
+  touch-action: manipulation;
 }
 
 ::selection {
   background: rgba(56, 189, 248, 0.35);
   color: #0284c7;
 }
+
