@@ -1,31 +1,39 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { 
-  Plus, 
-  Send, 
-  Trash2, 
-  Clock, 
-  Layers, 
-  Image as ImageIcon, 
-  FileText, 
-  Download, 
-  Satellite, 
-  Compass, 
-  LogOut, 
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import {
+  Plus,
+  Send,
+  Trash2,
+  Layers,
+  Image as ImageIcon,
+  FileText,
+  Download,
+  Compass,
+  LogOut,
   Eye,
   UploadCloud,
   Pin,
   PinOff,
   Sliders,
-  MoreHorizontal
+  AlertCircle,
+  CheckCircle2,
+  Loader2,
+  Clock,
+  RefreshCw,
+  Wifi,
+  WifiOff,
 } from 'lucide-react';
-import { 
-  saveRecentQuery, 
-  subscribeToUserRecents, 
+import {
+  saveRecentQuery,
+  subscribeToUserRecents,
   deleteRecentQuery,
-  logoutUser 
+  logoutUser,
+  fileToBase64,
+  submitQueryToFirebase,
+  listenForQueryResult,
 } from '../firebase/firebaseConfig';
 import './SatQueryWorkspace.css';
 
+// ─── Preset Datasets (demo / offline fallback) ───────────────────────────────
 const PRESET_DATASETS = [
   {
     id: 'bitemporal-river',
@@ -102,24 +110,44 @@ const PRESET_DATASETS = [
   }
 ];
 
+// ─── Query status step definitions ───────────────────────────────────────────
+const STATUS_STEPS = {
+  encoding:    { label: 'Encoding image…',          icon: 'spinner',    color: '#6366f1' },
+  pending:     { label: 'Queued for analysis…',      icon: 'clock',      color: '#f59e0b' },
+  processing:  { label: 'Qwen VLM analyzing…',       icon: 'spinner',    color: '#0ea5e9' },
+  done:        { label: 'Analysis complete',          icon: 'check',      color: '#10b981' },
+  error:       { label: 'Analysis failed',            icon: 'error',      color: '#ef4444' },
+  timeout:     { label: 'Backend not responding',     icon: 'error',      color: '#f97316' },
+};
+
+// ─── Pipeline timeout (ms) — if backend doesn't respond within this, show timeout ──
+const RESULT_TIMEOUT_MS = 120_000; // 2 minutes
+
+// ─── Component ───────────────────────────────────────────────────────────────
 export default function SatQueryWorkspace({ user, onLogout }) {
-  const [recents, setRecents] = useState([]);
-  const [pinnedItems, setPinnedItems] = useState(() => {
+  const [recents, setRecents]               = useState([]);
+  const [pinnedItems, setPinnedItems]       = useState(() => {
     try { return JSON.parse(localStorage.getItem(`bytex_pinned_${user?.uid}`) || '[]'); } catch { return []; }
   });
-  const [currentQuery, setCurrentQuery] = useState('');
+  const [currentQuery, setCurrentQuery]     = useState('');
   const [uploadedImages, setUploadedImages] = useState([]);
+  const [uploadedFiles, setUploadedFiles]   = useState([]);   // raw File objects for Storage upload
   const [analysisResult, setAnalysisResult] = useState(null);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isAnalyzing, setIsAnalyzing]       = useState(false);
+  const [queryStatus, setQueryStatus]       = useState(null);  // null | uploading | pending | processing | done | error | timeout
+  const [queryError, setQueryError]         = useState(null);
   const [sliderPosition, setSliderPosition] = useState(50);
-  const [activeTab, setActiveTab] = useState('evidence');
+  const [activeTab, setActiveTab]           = useState('evidence');
   const [showUploadModal, setShowUploadModal] = useState(false);
-  const [isDragging, setIsDragging] = useState(false);
+  const [isDragging, setIsDragging]         = useState(false);
   const [activeCrossmodalLayer, setActiveCrossmodalLayer] = useState('optical');
-  const [hoveredRecent, setHoveredRecent] = useState(null);
+  const [hoveredRecent, setHoveredRecent]   = useState(null);
 
-  const fileInputRef = useRef(null);
+  const fileInputRef     = useRef(null);
+  const unsubListenerRef = useRef(null);   // Firebase listener cleanup
+  const timeoutRef       = useRef(null);   // result timeout handle
 
+  // ─── Recents subscription ─────────────────────────────────────────────────
   useEffect(() => {
     if (!user?.uid) return;
     const unsubscribe = subscribeToUserRecents(user.uid, (data) => {
@@ -128,13 +156,22 @@ export default function SatQueryWorkspace({ user, onLogout }) {
     return () => unsubscribe();
   }, [user]);
 
-  // Save pinned items to localStorage
+  // ─── Persist pinned ──────────────────────────────────────────────────────
   useEffect(() => {
     if (user?.uid) {
       localStorage.setItem(`bytex_pinned_${user.uid}`, JSON.stringify(pinnedItems));
     }
   }, [pinnedItems, user]);
 
+  // ─── Cleanup listeners on unmount ────────────────────────────────────────
+  useEffect(() => {
+    return () => {
+      unsubListenerRef.current?.();
+      clearTimeout(timeoutRef.current);
+    };
+  }, []);
+
+  // ─── Pin helpers ─────────────────────────────────────────────────────────
   const togglePin = (item) => {
     const isPinned = pinnedItems.some(p => p.id === item.id);
     if (isPinned) {
@@ -143,12 +180,12 @@ export default function SatQueryWorkspace({ user, onLogout }) {
       setPinnedItems(prev => [item, ...prev]);
     }
   };
-
   const isPinned = (id) => pinnedItems.some(p => p.id === id);
 
-  const handleDragOver = (e) => { e.preventDefault(); setIsDragging(true); };
+  // ─── Drag & Drop ─────────────────────────────────────────────────────────
+  const handleDragOver  = (e) => { e.preventDefault(); setIsDragging(true); };
   const handleDragLeave = (e) => { e.preventDefault(); setIsDragging(false); };
-  const handleDrop = (e) => {
+  const handleDrop      = (e) => {
     e.preventDefault();
     setIsDragging(false);
     if (e.dataTransfer.files?.length > 0) processSelectedFiles(e.dataTransfer.files);
@@ -157,18 +194,25 @@ export default function SatQueryWorkspace({ user, onLogout }) {
   const processSelectedFiles = (files) => {
     const fileList = Array.from(files);
     const newImages = [];
+    const newFiles  = [];
+
     fileList.forEach((file) => {
-      const isSAR = file.name.toLowerCase().includes('sar') || file.name.toLowerCase().includes('risat');
+      const isSAR    = file.name.toLowerCase().includes('sar') || file.name.toLowerCase().includes('risat');
       const isBefore = file.name.toLowerCase().includes('before') || file.name.toLowerCase().includes('t1');
-      const isAfter = file.name.toLowerCase().includes('after') || file.name.toLowerCase().includes('t2');
-      let modality = 'Optical';
-      if (isSAR) modality = 'SAR Microwave';
+      const isAfter  = file.name.toLowerCase().includes('after')  || file.name.toLowerCase().includes('t2');
+      let modality   = 'Optical';
+      if (isSAR)    modality = 'SAR Microwave';
       else if (isBefore) modality = 'Bi-Temporal T1 (Before)';
-      else if (isAfter) modality = 'Bi-Temporal T2 (After)';
+      else if (isAfter)  modality = 'Bi-Temporal T2 (After)';
+
       const reader = new FileReader();
       reader.onload = (e) => {
         newImages.push({ name: file.name, url: e.target.result, modality, size: (file.size / 1024).toFixed(1) + ' KB' });
-        if (newImages.length === fileList.length) setUploadedImages((prev) => [...prev, ...newImages].slice(0, 4));
+        newFiles.push(file);
+        if (newImages.length === fileList.length) {
+          setUploadedImages((prev) => [...prev, ...newImages].slice(0, 4));
+          setUploadedFiles((prev)  => [...prev, ...newFiles].slice(0, 4));
+        }
       };
       reader.readAsDataURL(file);
     });
@@ -176,20 +220,32 @@ export default function SatQueryWorkspace({ user, onLogout }) {
 
   const handleLoadPreset = (preset) => {
     setUploadedImages(preset.images);
+    setUploadedFiles([]);   // preset images are URLs, no raw files
     setCurrentQuery(preset.query);
     setShowUploadModal(false);
   };
 
   const handleNewAnalysis = () => {
+    // Stop any running listener / timeout
+    unsubListenerRef.current?.();
+    clearTimeout(timeoutRef.current);
+
     setUploadedImages([]);
+    setUploadedFiles([]);
     setCurrentQuery('');
     setAnalysisResult(null);
+    setQueryStatus(null);
+    setQueryError(null);
+    setIsAnalyzing(false);
   };
 
   const handleSelectRecent = (item) => {
     setCurrentQuery(item.query || '');
     setUploadedImages(item.images || []);
+    setUploadedFiles([]);
     setAnalysisResult(item.result || null);
+    setQueryStatus(null);
+    setQueryError(null);
   };
 
   const handleDeleteRecent = async (e, id) => {
@@ -197,69 +253,201 @@ export default function SatQueryWorkspace({ user, onLogout }) {
     if (user?.uid) await deleteRecentQuery(user.uid, id);
   };
 
-  const handleRunAnalysis = async () => {
-    if (!currentQuery.trim() && uploadedImages.length === 0) return;
-    setIsAnalyzing(true);
-
-    const qLower = currentQuery.toLowerCase();
-    const isBiTemporal = uploadedImages.length >= 2 && (qLower.includes('change') || qLower.includes('dates') || qLower.includes('between'));
-    const isCrossModal = uploadedImages.some(img => img.modality?.includes('SAR')) || (qLower.includes('sar') && qLower.includes('optical'));
-
-    let taskType = 'single';
-    let taskName = 'Single-Image VQA & Grounding';
-    let modelName = 'Qwen2.5-VL-3B-RS';
-
-    if (isBiTemporal) { taskType = 'bitemporal'; taskName = 'Change Detection & VQA'; modelName = 'Qwen2.5-VL-3B-RS + ChangeSiam'; }
-    else if (isCrossModal) { taskType = 'crossmodal'; taskName = 'Optical-SAR Joint Extraction'; modelName = 'Qwen2.5-VL-3B-RS + FusionNet'; }
-
-    setTimeout(async () => {
-      const matchedPreset = PRESET_DATASETS.find(p => p.type === taskType) || PRESET_DATASETS[0];
-      const resultPayload = {
-        title: currentQuery.length > 40 ? currentQuery.substring(0, 40) + '...' : currentQuery || 'Satellite Analysis',
-        query: currentQuery,
-        taskType,
-        taskName,
-        backendModel: modelName,
-        confidence: (94.5 + Math.random() * 4.5).toFixed(1),
-        textResponse: matchedPreset.response,
-        metrics: matchedPreset.metrics,
-      };
-
-      setAnalysisResult(resultPayload);
-      setIsAnalyzing(false);
-
-      if (user?.uid) {
-        await saveRecentQuery(user.uid, {
-          id: `query_${Date.now()}`,
-          title: resultPayload.title,
-          query: currentQuery,
-          taskType,
-          images: uploadedImages.map(img => ({ name: img.name, modality: img.modality, url: img.url })),
-          result: resultPayload,
-          timestamp: Date.now()
-        });
-      }
-    }, 1800);
-  };
-
+  // ─── Download report ─────────────────────────────────────────────────────
   const handleDownloadReport = () => {
     if (!analysisResult) return;
     const reportContent = `# SatQuery AI - Analysis Report\nDate: ${new Date().toLocaleString()}\n\n## Query:\n"${analysisResult.query}"\n\n## Task: ${analysisResult.taskName}\n## Model: ${analysisResult.backendModel}\n## Confidence: ${analysisResult.confidence}%\n\n## Findings:\n${analysisResult.textResponse}\n\n## Metrics:\n${JSON.stringify(analysisResult.metrics || {}, null, 2)}`;
     const blob = new Blob([reportContent], { type: 'text/markdown' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
     a.download = `SatQuery_Report_${Date.now()}.md`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
-  // Filter unpinned recents
+  // ─── Determine task type from query + images ──────────────────────────────
+  const detectTaskType = (query, images) => {
+    const qLower      = query.toLowerCase();
+    const isBiTemporal = images.length >= 2 && (qLower.includes('change') || qLower.includes('dates') || qLower.includes('between'));
+    const isCrossModal = images.some(img => img.modality?.includes('SAR')) || (qLower.includes('sar') && qLower.includes('optical'));
+    if (isBiTemporal) return { taskType: 'bitemporal', taskName: 'Change Detection & VQA',      modelName: 'Qwen2.5-VL-3B-RS + ChangeSiam', fbTask: 'vqa' };
+    if (isCrossModal) return { taskType: 'crossmodal', taskName: 'Optical-SAR Joint Extraction', modelName: 'Qwen2.5-VL-3B-RS + FusionNet',  fbTask: 'vqa' };
+    return               { taskType: 'single',     taskName: 'Single-Image VQA & Grounding', modelName: 'Qwen2.5-VL-3B-RS',              fbTask: 'vqa' };
+  };
+
+  // ─── Build result payload from Firebase answer ────────────────────────────
+  const buildResultPayload = (fbData, taskInfo) => ({
+    title:        currentQuery.length > 40 ? currentQuery.substring(0, 40) + '…' : currentQuery || 'Satellite Analysis',
+    query:        currentQuery,
+    taskType:     taskInfo.taskType,
+    taskName:     taskInfo.taskName,
+    backendModel: taskInfo.modelName,
+    confidence:   fbData.confidence != null ? (fbData.confidence * 100).toFixed(1) : '—',
+    textResponse: fbData.answer || 'No answer returned.',
+    metrics:      fbData.metrics || null,
+  });
+
+  // ─── MAIN ANALYSIS PIPELINE ──────────────────────────────────────────────
+  const handleRunAnalysis = async () => {
+    if (isAnalyzing) return;
+    if (!currentQuery.trim() && uploadedImages.length === 0) return;
+
+    // Stop previous listener
+    unsubListenerRef.current?.();
+    clearTimeout(timeoutRef.current);
+
+    setIsAnalyzing(true);
+    setAnalysisResult(null);
+    setQueryError(null);
+
+    const taskInfo = detectTaskType(currentQuery, uploadedImages);
+    const primaryFile = uploadedFiles[0] || null;
+
+    // ── If preset (no raw file), run demo mode ────────────────────────────
+    if (!primaryFile) {
+      setQueryStatus('pending');
+      await _runDemoMode(taskInfo);
+      return;
+    }
+
+    // ── Real pipeline via Firebase RTDB (base64 — no Storage needed) ──────
+    try {
+      // Step 1 — Encode image to base64 (resized to ≤1024px, JPEG 85%)
+      setQueryStatus('encoding');
+      const imageBase64 = await fileToBase64(primaryFile, 1024);
+
+      // Step 2 — Write query + base64 image to RTDB
+      setQueryStatus('pending');
+      const queryId = await submitQueryToFirebase(
+        user?.uid || 'anonymous',
+        imageBase64,
+        currentQuery || 'Describe this satellite image.',
+        taskInfo.fbTask
+      );
+
+
+      // Step 3 — Listen for result
+      const unsub = listenForQueryResult(queryId, {
+        onStatusChange: (status) => {
+          if (status && status !== 'done' && status !== 'error') {
+            setQueryStatus(status);
+          }
+        },
+        onResult: async (fbData) => {
+          clearTimeout(timeoutRef.current);
+          unsubListenerRef.current?.();
+          setQueryStatus('done');
+
+          const resultPayload = buildResultPayload(fbData, taskInfo);
+          setAnalysisResult(resultPayload);
+          setIsAnalyzing(false);
+
+          // Save to recents
+          if (user?.uid) {
+            await saveRecentQuery(user.uid, {
+              id:        `query_${Date.now()}`,
+              title:     resultPayload.title,
+              query:     currentQuery,
+              taskType:  taskInfo.taskType,
+              images:    uploadedImages.map(img => ({ name: img.name, modality: img.modality, url: img.url })),
+              result:    resultPayload,
+              timestamp: Date.now(),
+            });
+          }
+        },
+        onError: (errMsg) => {
+          clearTimeout(timeoutRef.current);
+          setQueryStatus('error');
+          setQueryError(errMsg || 'Unknown error from backend.');
+          setIsAnalyzing(false);
+        },
+      });
+      unsubListenerRef.current = unsub;
+
+      // Step 4 — Timeout guard
+      timeoutRef.current = setTimeout(() => {
+        unsubListenerRef.current?.();
+        if (queryStatus !== 'done') {
+          setQueryStatus('timeout');
+          setQueryError('The backend did not respond within 2 minutes. Make sure it is running and Firebase is connected.');
+          setIsAnalyzing(false);
+        }
+      }, RESULT_TIMEOUT_MS);
+
+    } catch (err) {
+      console.error('Analysis pipeline error:', err);
+      setQueryStatus('error');
+      setQueryError(err.message || 'Failed to start analysis.');
+      setIsAnalyzing(false);
+    }
+  };
+
+  // ─── Demo / preset mode (no real file uploaded) ───────────────────────────
+  const _runDemoMode = async (taskInfo) => {
+    return new Promise((resolve) => {
+      setTimeout(async () => {
+        setQueryStatus('processing');
+        setTimeout(async () => {
+          const matchedPreset = PRESET_DATASETS.find(p => p.type === taskInfo.taskType) || PRESET_DATASETS[0];
+          const resultPayload = {
+            title:        currentQuery.length > 40 ? currentQuery.substring(0, 40) + '…' : currentQuery || 'Satellite Analysis',
+            query:        currentQuery,
+            taskType:     taskInfo.taskType,
+            taskName:     taskInfo.taskName,
+            backendModel: taskInfo.modelName + ' (Demo)',
+            confidence:   (94.5 + Math.random() * 4.5).toFixed(1),
+            textResponse: matchedPreset.response,
+            metrics:      matchedPreset.metrics,
+            isDemo:       true,
+          };
+          setQueryStatus('done');
+          setAnalysisResult(resultPayload);
+          setIsAnalyzing(false);
+
+          if (user?.uid) {
+            await saveRecentQuery(user.uid, {
+              id:        `query_${Date.now()}`,
+              title:     resultPayload.title,
+              query:     currentQuery,
+              taskType:  taskInfo.taskType,
+              images:    uploadedImages.map(img => ({ name: img.name, modality: img.modality, url: img.url })),
+              result:    resultPayload,
+              timestamp: Date.now(),
+            });
+          }
+          resolve();
+        }, 1400);
+      }, 800);
+    });
+  };
+
+  // ─── Retry handler ────────────────────────────────────────────────────────
+  const handleRetry = () => {
+    setQueryStatus(null);
+    setQueryError(null);
+    setAnalysisResult(null);
+    handleRunAnalysis();
+  };
+
+  // ─── Filter unpinned recents ─────────────────────────────────────────────
   const unpinnedRecents = recents.filter(r => !isPinned(r.id));
+
+  // ─── Status Step Icon ─────────────────────────────────────────────────────
+  const StatusIcon = ({ type, size = 16 }) => {
+    if (type === 'spinner') return <Loader2 size={size} className="spin-icon" />;
+    if (type === 'upload')  return <UploadCloud size={size} />;
+    if (type === 'clock')   return <Clock size={size} />;
+    if (type === 'check')   return <CheckCircle2 size={size} />;
+    if (type === 'error')   return <AlertCircle size={size} />;
+    return null;
+  };
+
+  const currentStatusDef = queryStatus ? STATUS_STEPS[queryStatus] : null;
 
   return (
     <div className="workspace-layout">
-      {/* LEFT SIDEBAR: Like Image 4 - Pinned + Recents with hover pin */}
+      {/* ─── LEFT SIDEBAR ─────────────────────────────────────────────── */}
       <aside className="workspace-sidebar">
         <div className="sidebar-top">
           <div className="sidebar-brand">
@@ -277,8 +465,8 @@ export default function SatQueryWorkspace({ user, onLogout }) {
             <div className="section-label">Pinned</div>
             <div className="section-list">
               {pinnedItems.map((item) => (
-                <div 
-                  key={item.id} 
+                <div
+                  key={item.id}
                   className="sidebar-item"
                   onClick={() => handleSelectRecent(item)}
                   onMouseEnter={() => setHoveredRecent(item.id)}
@@ -310,8 +498,8 @@ export default function SatQueryWorkspace({ user, onLogout }) {
               <div className="empty-recents"><p>All items pinned</p></div>
             ) : (
               unpinnedRecents.map((item) => (
-                <div 
-                  key={item.id} 
+                <div
+                  key={item.id}
                   className="sidebar-item"
                   onClick={() => handleSelectRecent(item)}
                   onMouseEnter={() => setHoveredRecent(item.id)}
@@ -334,13 +522,13 @@ export default function SatQueryWorkspace({ user, onLogout }) {
           </div>
         </div>
 
-        {/* User at bottom */}
+        {/* User footer */}
         <div className="sidebar-user-footer">
           <div className="user-info-card">
-            <img 
-              src={user?.photoURL || `https://api.dicebear.com/7.x/bottts/svg?seed=${user?.uid || 'bytex'}`} 
-              alt="User" 
-              className="user-avatar" 
+            <img
+              src={user?.photoURL || `https://api.dicebear.com/7.x/bottts/svg?seed=${user?.uid || 'bytex'}`}
+              alt="User"
+              className="user-avatar"
             />
             <span className="user-name">{user?.displayName || user?.email?.split('@')[0] || 'Analyst'}</span>
           </div>
@@ -350,21 +538,19 @@ export default function SatQueryWorkspace({ user, onLogout }) {
         </div>
       </aside>
 
-      {/* MAIN WORKSPACE */}
+      {/* ─── MAIN WORKSPACE ───────────────────────────────────────────── */}
       <main className="workspace-main" onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}>
-
-        {/* Center content: Input in the MIDDLE of the page */}
         <div className="workspace-content-center">
 
-          {/* Welcome + Query Input (centered vertically when no result) */}
-          <div className={`center-input-zone ${analysisResult || isAnalyzing ? 'pushed-top' : ''}`}>
-            {!analysisResult && !isAnalyzing && (
+          {/* Center input zone */}
+          <div className={`center-input-zone ${analysisResult || isAnalyzing || queryStatus ? 'pushed-top' : ''}`}>
+            {!analysisResult && !isAnalyzing && !queryStatus && (
               <div className="welcome-msg">
                 <h1 className="welcome-title">What would you like to analyze?</h1>
               </div>
             )}
 
-            {/* Query Input Bar - Always visible in center */}
+            {/* Query Input Bar */}
             <div className="query-box-wrapper">
               {uploadedImages.length > 0 && (
                 <div className="uploaded-chips-row">
@@ -375,7 +561,13 @@ export default function SatQueryWorkspace({ user, onLogout }) {
                         <span className="chip-name">{img.name}</span>
                         <span className="chip-modality">{img.modality}</span>
                       </div>
-                      <button className="chip-remove-btn" onClick={() => setUploadedImages(prev => prev.filter((_, i) => i !== index))}>×</button>
+                      <button
+                        className="chip-remove-btn"
+                        onClick={() => {
+                          setUploadedImages(prev => prev.filter((_, i) => i !== index));
+                          setUploadedFiles(prev => prev.filter((_, i) => i !== index));
+                        }}
+                      >×</button>
                     </div>
                   ))}
                 </div>
@@ -386,20 +578,26 @@ export default function SatQueryWorkspace({ user, onLogout }) {
                   <Plus size={22} />
                 </button>
 
-                <input type="file" ref={fileInputRef} multiple accept="image/*,.tif,.tiff" style={{ display: 'none' }}
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  multiple
+                  accept="image/*,.tif,.tiff"
+                  style={{ display: 'none' }}
                   onChange={(e) => { if (e.target.files) processSelectedFiles(e.target.files); }}
                 />
 
-                <input 
-                  type="text" 
-                  className="query-text-input" 
-                  placeholder="Ask about satellite imagery..."
+                <input
+                  type="text"
+                  className="query-text-input"
+                  placeholder="Ask about satellite imagery…"
                   value={currentQuery}
                   onChange={(e) => setCurrentQuery(e.target.value)}
                   onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleRunAnalysis(); } }}
+                  disabled={isAnalyzing}
                 />
 
-                <button 
+                <button
                   className={`send-query-btn ${(currentQuery.trim() || uploadedImages.length > 0) && !isAnalyzing ? 'active' : ''}`}
                   onClick={handleRunAnalysis}
                   disabled={isAnalyzing || (!currentQuery.trim() && uploadedImages.length === 0)}
@@ -409,8 +607,8 @@ export default function SatQueryWorkspace({ user, onLogout }) {
               </div>
             </div>
 
-            {/* Quick preset shortcuts below input (only when no result) */}
-            {!analysisResult && !isAnalyzing && (
+            {/* Quick preset shortcuts */}
+            {!analysisResult && !isAnalyzing && !queryStatus && (
               <div className="quick-presets-row">
                 {PRESET_DATASETS.map((preset) => (
                   <button key={preset.id} className="preset-chip" onClick={() => handleLoadPreset(preset)}>
@@ -422,18 +620,60 @@ export default function SatQueryWorkspace({ user, onLogout }) {
             )}
           </div>
 
-          {/* Analyzing State */}
-          {isAnalyzing && (
-            <div className="analyzing-state">
-              <div className="analyzing-spinner"></div>
-              <span className="analyzing-text">Analyzing with Qwen2.5-VL-3B...</span>
+          {/* ── Status Pipeline Bar ──────────────────────────────────────── */}
+          {queryStatus && queryStatus !== 'done' && (
+            <div className="status-pipeline-bar">
+              <div className="status-pipeline-steps">
+                {['encoding', 'pending', 'processing'].map((step) => {
+                  const stepIdx   = ['encoding', 'pending', 'processing'].indexOf(step);
+                  const curIdx    = ['encoding', 'pending', 'processing'].indexOf(queryStatus);
+                  const isDone    = stepIdx < curIdx || queryStatus === 'done';
+                  const isCurrent = stepIdx === curIdx && queryStatus !== 'error' && queryStatus !== 'timeout';
+                  const isError   = (queryStatus === 'error' || queryStatus === 'timeout') && stepIdx === curIdx;
+                  return (
+                    <div key={step} className={`pipeline-step ${isDone ? 'done' : ''} ${isCurrent ? 'current' : ''} ${isError ? 'errored' : ''}`}>
+                      <div className="step-dot">
+                        {isDone ? <CheckCircle2 size={13} /> : isCurrent ? <Loader2 size={13} className="spin-icon" /> : isError ? <AlertCircle size={13} /> : null}
+                      </div>
+                      <span className="step-label">{STATUS_STEPS[step]?.label || step}</span>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Error / timeout message */}
+              {(queryStatus === 'error' || queryStatus === 'timeout') && queryError && (
+                <div className="status-error-row">
+                  <AlertCircle size={15} />
+                  <span>{queryError}</span>
+                  <button className="retry-btn" onClick={handleRetry}>
+                    <RefreshCw size={13} /> Retry
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
-          {/* Results BELOW the input bar */}
+          {/* ── Processing spinner ───────────────────────────────────────── */}
+          {isAnalyzing && queryStatus === 'processing' && (
+            <div className="analyzing-state">
+              <div className="analyzing-spinner"></div>
+              <span className="analyzing-text">Qwen2.5-VL analyzing your image…</span>
+            </div>
+          )}
+
+          {/* ── Results ──────────────────────────────────────────────────── */}
           {analysisResult && !isAnalyzing && (
             <div className="analysis-result-below">
-              {/* Tab Navigation: Only Evidence + Textual */}
+              {/* Demo badge */}
+              {analysisResult.isDemo && (
+                <div className="demo-notice">
+                  <ImageIcon size={14} />
+                  <span>Demo response — upload a real satellite image to use Qwen VLM</span>
+                </div>
+              )}
+
+              {/* Tab Navigation */}
               <div className="result-tabs-nav">
                 <button className={`tab-btn ${activeTab === 'evidence' ? 'active' : ''}`} onClick={() => setActiveTab('evidence')}>
                   <Eye size={16} />
@@ -484,8 +724,11 @@ export default function SatQueryWorkspace({ user, onLogout }) {
                         ))}
                       </div>
                       <div className="crossmodal-image-display">
-                        <img src={activeCrossmodalLayer === 'sar' ? (uploadedImages[1]?.url || '/samples/sar_sample.jpg') : (uploadedImages[0]?.url || '/samples/optical_sample.jpg')}
-                          alt="Crossmodal scene" className={`crossmodal-img ${activeCrossmodalLayer === 'fusion' ? 'fusion-mode' : ''}`} />
+                        <img
+                          src={activeCrossmodalLayer === 'sar' ? (uploadedImages[1]?.url || '/samples/sar_sample.jpg') : (uploadedImages[0]?.url || '/samples/optical_sample.jpg')}
+                          alt="Crossmodal scene"
+                          className={`crossmodal-img ${activeCrossmodalLayer === 'fusion' ? 'fusion-mode' : ''}`}
+                        />
                       </div>
                     </div>
                   )}
@@ -560,12 +803,12 @@ export default function SatQueryWorkspace({ user, onLogout }) {
               <button className="option-tile" onClick={() => handleLoadPreset(PRESET_DATASETS[0])}>
                 <Layers size={28} className="tile-icon icon-blue" />
                 <span className="tile-title">Bi-Temporal Pair</span>
-                <span className="tile-desc">Before & After</span>
+                <span className="tile-desc">Before & After (Demo)</span>
               </button>
               <button className="option-tile" onClick={() => handleLoadPreset(PRESET_DATASETS[1])}>
                 <Compass size={28} className="tile-icon icon-cyan" />
                 <span className="tile-title">Optical + SAR</span>
-                <span className="tile-desc">Cartosat-2S & RISAT</span>
+                <span className="tile-desc">Cartosat-2S & RISAT (Demo)</span>
               </button>
             </div>
           </div>

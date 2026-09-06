@@ -8,6 +8,10 @@ Load order:
   1. Try local LoRA adapter (fastest — no download)
   2. Try HuggingFace repo adapter
   3. Fall back to base model (no fine-tuning)
+
+Stub mode (SATQUERY_MODEL_MODE=stub):
+  Returns placeholder responses without loading any model.
+  Use this to test the full Firebase pipeline before Qwen is available.
 """
 
 import io
@@ -42,13 +46,14 @@ class SatQueryModel:
         self._device    = None
         self._initialized = True
         self._stats = {"queries": 0, "errors": 0}
+        self._stub_mode = False
 
     # ─────────────────────────────────────────────
     # Properties
     # ─────────────────────────────────────────────
     @property
     def is_loaded(self) -> bool:
-        return self._model is not None
+        return self._model is not None or self._stub_mode
 
     @property
     def stats(self) -> dict:
@@ -58,7 +63,18 @@ class SatQueryModel:
     # Load
     # ─────────────────────────────────────────────
     def load(self):
-        """Load base model + LoRA adapter with 4-bit quantization."""
+        """Load base model + LoRA adapter with 4-bit quantization.
+        
+        If SATQUERY_MODEL_MODE=stub, skips loading and enables stub responses.
+        """
+        from backend.config import MODEL_MODE
+
+        if MODEL_MODE == "stub":
+            self._stub_mode = True
+            print("  ⚙  Stub mode enabled — Qwen will NOT be loaded.")
+            print("     Set SATQUERY_MODEL_MODE=real to load the actual model.")
+            return
+
         if self._model is not None:
             return
 
@@ -144,6 +160,8 @@ class SatQueryModel:
     # Public inference methods
     # ─────────────────────────────────────────────
     def answer_vqa(self, image: Image.Image, question: str) -> dict:
+        if self._stub_mode:
+            return self._stub_response("vqa", image, question)
         answer, confidence = self._generate(image, question, "vqa")
         self._stats["queries"] += 1
         return {
@@ -153,6 +171,8 @@ class SatQueryModel:
         }
 
     def generate_caption(self, image: Image.Image) -> dict:
+        if self._stub_mode:
+            return self._stub_response("caption", image, "")
         prompt = "Describe the contents of this remote sensing image in detail."
         caption, confidence = self._generate(image, prompt, "caption")
         self._stats["queries"] += 1
@@ -163,6 +183,8 @@ class SatQueryModel:
         }
 
     def locate_object(self, image: Image.Image, expression: str) -> dict:
+        if self._stub_mode:
+            return self._stub_response("refer", image, expression)
         prompt = f"Give me the location of {expression}"
         raw_output, confidence = self._generate(image, prompt, "refer")
         bbox = self._parse_bbox(raw_output)
@@ -173,6 +195,36 @@ class SatQueryModel:
             "confidence":      confidence,
             "reasoning_trace": f"Referring '{expression}' in {image.size[0]}x{image.size[1]} image.",
         }
+
+    # ─────────────────────────────────────────────
+    # Stub responses (no model loaded)
+    # ─────────────────────────────────────────────
+    def _stub_response(self, task: str, image: Image.Image, text: str) -> dict:
+        """Return a clearly-labeled placeholder when model is not loaded."""
+        self._stats["queries"] += 1
+        size_str = f"{image.size[0]}x{image.size[1]}"
+        stub_answers = {
+            "vqa":     f"[STUB MODE] Received your question: \"{text}\". "
+                       f"The Qwen2.5-VL model is not yet loaded on this machine. "
+                       f"Image size detected: {size_str}. "
+                       f"Please start the backend with SATQUERY_MODEL_MODE=real once Qwen is available.",
+            "caption": f"[STUB MODE] This is a {size_str} satellite/aerial image. "
+                       f"Detailed caption will be generated once the Qwen VLM is connected.",
+            "refer":   f"[STUB MODE] Referring expression received: \"{text}\". "
+                       f"Bounding box will be returned once the Qwen model is running.",
+        }
+        answer = stub_answers.get(task, "[STUB MODE] Model not loaded.")
+        result = {
+            "answer":         answer,
+            "confidence":     0.0,
+            "reasoning_trace": f"Stub mode — no inference performed.",
+        }
+        if task == "caption":
+            result["caption"] = answer
+        if task == "refer":
+            result["raw_output"] = answer
+            result["bbox"] = None
+        return result
 
     # ─────────────────────────────────────────────
     # Core generation
@@ -259,14 +311,15 @@ class SatQueryModel:
     def get_status(self) -> dict:
         info = {
             "model_loaded": self.is_loaded,
-            "model_name":   "Qwen/Qwen2.5-VL-3B-Instruct",
+            "model_name":   "Qwen/Qwen2.5-VL-3B-Instruct" + (" (stub)" if self._stub_mode else ""),
             "gpu_name":     None,
             "vram_used_gb": None,
             "vram_total_gb": None,
             "queries_processed": self._stats["queries"],
             "errors":            self._stats["errors"],
+            "stub_mode":         self._stub_mode,
         }
-        if torch.cuda.is_available():
+        if torch.cuda.is_available() and not self._stub_mode:
             info["gpu_name"]      = torch.cuda.get_device_name(0)
             info["vram_used_gb"]  = round(torch.cuda.memory_allocated() / 1024**3, 2)
             info["vram_total_gb"] = round(

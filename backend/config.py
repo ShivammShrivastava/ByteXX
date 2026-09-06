@@ -1,32 +1,47 @@
 """
 SatQuery AI — Backend Configuration
 =====================================
+All values can be overridden via environment variables.
+Copy backend/.env.example → backend/.env and fill in your values.
 """
 import os
 
 # ─────────────────────────────────────────────
 # Model
 # ─────────────────────────────────────────────
-HF_LORA_REPO   = "shivamw/satquery-ai-vqa-lora"   # HF repo after training
-BASE_MODEL_NAME = "Qwen/Qwen2.5-VL-3B-Instruct"
+# The base Qwen2.5-VL-3B model from HuggingFace Hub
+BASE_MODEL_NAME = os.environ.get(
+    "SATQUERY_BASE_MODEL",
+    "Qwen/Qwen2.5-VL-3B-Instruct"
+)
 
-# If you saved the adapter locally (from Jupyter Cell 8):
+# HuggingFace repo for LoRA adapter (used if LOCAL_ADAPTER_PATH is missing)
+HF_LORA_REPO = os.environ.get(
+    "SATQUERY_HF_LORA_REPO",
+    "shivamw/satquery-ai-vqa-lora"
+)
+
+# Local path to a saved LoRA adapter directory (fastest — no download)
 LOCAL_ADAPTER_PATH = os.environ.get(
     "SATQUERY_ADAPTER_PATH",
     r"C:\Users\IPS\Desktop\Satellite\satquery-ai-vqa-lora"
 )
 
-# 4-bit quantization — keeps model within 4 GB VRAM on RTX 3050
-LOAD_IN_4BIT = True
+# Enable 4-bit NF4 quantization (needs bitsandbytes + CUDA)
+LOAD_IN_4BIT = os.environ.get("SATQUERY_LOAD_4BIT", "true").lower() == "true"
+
+# If set to "stub", the model manager will return placeholder responses
+# without loading Qwen — useful for testing the Firebase pipeline end-to-end.
+MODEL_MODE = os.environ.get("SATQUERY_MODEL_MODE", "real")   # "real" | "stub"
 
 # ─────────────────────────────────────────────
 # Generation
 # ─────────────────────────────────────────────
-MAX_NEW_TOKENS_VQA     = 64
-MAX_NEW_TOKENS_CAPTION = 256
-MAX_NEW_TOKENS_REFER   = 32
-TEMPERATURE            = 0.1
-DO_SAMPLE              = False
+MAX_NEW_TOKENS_VQA     = int(os.environ.get("SATQUERY_MAX_TOKENS_VQA",     "64"))
+MAX_NEW_TOKENS_CAPTION = int(os.environ.get("SATQUERY_MAX_TOKENS_CAPTION", "256"))
+MAX_NEW_TOKENS_REFER   = int(os.environ.get("SATQUERY_MAX_TOKENS_REFER",   "32"))
+TEMPERATURE            = float(os.environ.get("SATQUERY_TEMPERATURE",      "0.1"))
+DO_SAMPLE              = os.environ.get("SATQUERY_DO_SAMPLE", "false").lower() == "true"
 
 # ─────────────────────────────────────────────
 # System Prompt
@@ -41,7 +56,7 @@ RS_SYSTEM_PROMPT = (
 # ─────────────────────────────────────────────
 # Server
 # ─────────────────────────────────────────────
-API_HOST       = "0.0.0.0"
-API_PORT       = 8000
-CORS_ORIGINS   = ["*"]
-MAX_IMAGE_SIZE_MB = 10
+API_HOST          = os.environ.get("SATQUERY_HOST", "0.0.0.0")
+API_PORT          = int(os.environ.get("SATQUERY_PORT", "8000"))
+CORS_ORIGINS      = os.environ.get("SATQUERY_CORS_ORIGINS", "*").split(",")
+MAX_IMAGE_SIZE_MB = int(os.environ.get("SATQUERY_MAX_IMAGE_MB", "10"))

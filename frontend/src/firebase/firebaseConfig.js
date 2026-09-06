@@ -1,26 +1,31 @@
 // Firebase configuration and services for ByteX SatQuery AI
+// Note: Firebase Storage is NOT used (requires paid Blaze plan).
+// Images are base64-encoded and stored directly in the free Realtime Database.
 import { initializeApp, getApps, getApp } from 'firebase/app';
-import { 
-  getAuth, 
-  signInWithEmailAndPassword, 
-  createUserWithEmailAndPassword, 
-  signInWithPopup, 
-  GoogleAuthProvider, 
-  signOut as fbSignOut, 
+import {
+  getAuth,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  signInWithPopup,
+  GoogleAuthProvider,
+  signOut as fbSignOut,
   onAuthStateChanged,
   updateProfile
 } from 'firebase/auth';
-import { 
-  getDatabase, 
-  ref, 
-  set, 
-  onValue, 
-  remove
+import {
+  getDatabase,
+  ref as dbRef,
+  set,
+  onValue,
+  off,
+  remove,
+  push,
+  get,
 } from 'firebase/database';
 
 // ✅ Real Firebase configuration — satellite-efa0a (ByteX project)
 export const firebaseConfig = {
-  apiKey: "AIzaSyDJtjpV4DpD-Ev0BeRJDsfZV4k5U63dpW4",
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyDJtjpV4DpD-Ev0BeRJDsfZV4k5U63dpW4",
   authDomain: "satellite-efa0a.firebaseapp.com",
   databaseURL: "https://satellite-efa0a-default-rtdb.firebaseio.com",
   projectId: "satellite-efa0a",
@@ -70,7 +75,7 @@ export async function saveUserData(user, extraData = {}) {
   // Firebase RTDB at /users/{uid}/profile
   if (db) {
     try {
-      await set(ref(db, `users/${user.uid}/profile`), userData);
+      await set(dbRef(db, `users/${user.uid}/profile`), userData);
       console.log(`✅ User saved to RTDB: /users/${user.uid}/profile`);
     } catch (e) {
       console.warn("RTDB write error:", e.message);
@@ -102,7 +107,7 @@ export async function saveRecentQuery(uid, queryItem) {
   // RTDB: /users/{uid}/recents/{id}
   if (db) {
     try {
-      await set(ref(db, `users/${uid}/recents/${item.id}`), item);
+      await set(dbRef(db, `users/${uid}/recents/${item.id}`), item);
       console.log(`✅ Recent saved to RTDB: /users/${uid}/recents/${item.id}`);
     } catch (e) {
       console.warn("RTDB recents write:", e.message);
@@ -124,7 +129,7 @@ export function subscribeToUserRecents(uid, onUpdate) {
   if (!db) return () => {};
 
   try {
-    const recentsRef = ref(db, `users/${uid}/recents`);
+    const recentsRef = dbRef(db, `users/${uid}/recents`);
     const unsub = onValue(recentsRef, (snap) => {
       if (snap.exists()) {
         const items = Object.values(snap.val())
@@ -148,8 +153,127 @@ export async function deleteRecentQuery(uid, queryId) {
   } catch (e) {}
   if (db) {
     try {
-      await remove(ref(db, `users/${uid}/recents/${queryId}`));
+      await remove(dbRef(db, `users/${uid}/recents/${queryId}`));
     } catch (e) {}
+  }
+}
+
+// ─── Image → Base64 helper ──────────────────────────────────────────────────
+
+/**
+ * Convert a File to a base64 string, resizing to max 1024px first
+ * to keep the RTDB payload small (< 1 MB for most images).
+ * Returns a plain base64 string (no data: prefix).
+ */
+export function fileToBase64(file, maxDimension = 1024) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        let { width, height } = img;
+        if (width > maxDimension || height > maxDimension) {
+          if (width > height) { height = Math.round((height * maxDimension) / width); width = maxDimension; }
+          else                { width  = Math.round((width  * maxDimension) / height); height = maxDimension; }
+        }
+        canvas.width  = width;
+        canvas.height = height;
+        canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+        // JPEG at 85% quality keeps satellite detail while staying small
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+        resolve(dataUrl.split(',')[1]); // strip "data:image/jpeg;base64," prefix
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+// ─── Satellite Query Pipeline ───────────────────────────────────────────────
+
+/**
+ * Submit a VQA / caption / refer query to the backend via Firebase RTDB.
+ * The image is stored as base64 directly in RTDB (no Storage needed — free plan).
+ *
+ * @param {string} uid          - Firebase user ID
+ * @param {string} imageBase64  - Plain base64 string of the image (no data: prefix)
+ * @param {string} question     - User question
+ * @param {string} task         - "vqa" | "caption" | "refer"
+ * @returns {Promise<string>} queryId
+ */
+export async function submitQueryToFirebase(uid, imageBase64, question, task = 'vqa') {
+  if (!db) throw new Error("Firebase Database not initialized");
+
+  const queriesRef = dbRef(db, 'queries');
+  const newQuery = {
+    uid,
+    image_base64: imageBase64,   // backend reads this field directly
+    question,
+    task,
+    status: 'pending',
+    timestamp: Date.now(),
+    source: 'frontend_web',
+  };
+
+  const newRef = await push(queriesRef, newQuery);
+  const queryId = newRef.key;
+  console.log(`✅ Query submitted to RTDB (base64 image): /queries/${queryId}`);
+  return queryId;
+}
+
+/**
+ * Listen in real-time to /results/{queryId}.
+ * Calls onResult(data) as soon as the backend writes an answer.
+ * Calls onStatusChange(status) when query status updates.
+ *
+ * Returns an unsubscribe function — call it to stop listening.
+ */
+export function listenForQueryResult(queryId, { onResult, onStatusChange, onError }) {
+  if (!db || !queryId) return () => {};
+
+  const resultRef  = dbRef(db, `results/${queryId}`);
+  const queryRef   = dbRef(db, `queries/${queryId}`);
+
+  // Listen for result written to /results/{queryId}
+  const unsubResult = onValue(resultRef, (snap) => {
+    if (snap.exists()) {
+      const data = snap.val();
+      console.log(`✅ Result received for query ${queryId}:`, data);
+      onResult && onResult(data);
+    }
+  }, (err) => {
+    console.warn("Result listener error:", err.message);
+    onError && onError(err.message);
+  });
+
+  // Listen for status changes on /queries/{queryId}
+  const unsubQuery = onValue(queryRef, (snap) => {
+    if (snap.exists()) {
+      const status = snap.val()?.status;
+      onStatusChange && onStatusChange(status);
+    }
+  }, () => {});
+
+  // Return combined unsubscribe
+  return () => {
+    off(resultRef);
+    off(queryRef);
+  };
+}
+
+/**
+ * Get current query status from RTDB (one-time read).
+ */
+export async function getQueryStatus(queryId) {
+  if (!db || !queryId) return null;
+  try {
+    const snap = await get(dbRef(db, `queries/${queryId}`));
+    return snap.exists() ? snap.val() : null;
+  } catch (e) {
+    return null;
   }
 }
 

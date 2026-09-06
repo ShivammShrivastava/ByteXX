@@ -94,9 +94,10 @@ class FirebaseListener:
 
     def _handle_query(self, query_id: str, query_data: dict):
         """Process a single query."""
-        question   = query_data.get("question", "")
-        image_url  = query_data.get("image_url", "")
-        task       = query_data.get("task", "vqa")
+        question  = query_data.get("question", "")
+        image_b64 = query_data.get("image_base64", "")
+        image_url = query_data.get("image_url", "")
+        task      = query_data.get("task", "vqa")
 
         print(f"  Processing query {query_id}: '{question[:50]}'")
 
@@ -106,8 +107,13 @@ class FirebaseListener:
         )
 
         try:
-            # Download image
-            image = self._download_image(image_url)
+            # Load image — prefer base64 (free RTDB), fall back to URL (legacy)
+            if image_b64:
+                image = self._decode_base64_image(image_b64)
+            elif image_url:
+                image = self._download_image(image_url)
+            else:
+                raise ValueError("Query has neither image_base64 nor image_url")
 
             # Run inference
             if not self.model_manager.is_loaded:
@@ -155,6 +161,16 @@ class FirebaseListener:
             })
 
     @staticmethod
+    def _decode_base64_image(b64: str) -> Image.Image:
+        """Decode a plain base64 string (no data: prefix) into a PIL Image."""
+        import base64
+        try:
+            raw = base64.b64decode(b64)
+            return Image.open(io.BytesIO(raw)).convert("RGB")
+        except Exception as e:
+            raise ValueError(f"Failed to decode base64 image: {e}")
+
+    @staticmethod
     def _download_image(url: str) -> Image.Image:
         """Download image from URL (Firebase Storage download URL)."""
         req = urllib.request.Request(
@@ -164,3 +180,4 @@ class FirebaseListener:
         with urllib.request.urlopen(req, timeout=30) as response:
             img_bytes = response.read()
         return Image.open(io.BytesIO(img_bytes)).convert("RGB")
+
