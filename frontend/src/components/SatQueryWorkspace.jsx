@@ -21,6 +21,8 @@ import {
   RefreshCw,
   Wifi,
   WifiOff,
+  Mic,
+  MicOff,
 } from 'lucide-react';
 import {
   saveRecentQuery,
@@ -142,10 +144,13 @@ export default function SatQueryWorkspace({ user, onLogout }) {
   const [isDragging, setIsDragging]         = useState(false);
   const [activeCrossmodalLayer, setActiveCrossmodalLayer] = useState('optical');
   const [hoveredRecent, setHoveredRecent]   = useState(null);
+  const [selectedRecentId, setSelectedRecentId] = useState(null);
+  const [isListening, setIsListening]       = useState(false);
 
   const fileInputRef     = useRef(null);
   const unsubListenerRef = useRef(null);   // Firebase listener cleanup
   const timeoutRef       = useRef(null);   // result timeout handle
+  const recognitionRef   = useRef(null);   // Web Speech API instance
 
   // ─── Recents subscription ─────────────────────────────────────────────────
   useEffect(() => {
@@ -168,8 +173,45 @@ export default function SatQueryWorkspace({ user, onLogout }) {
     return () => {
       unsubListenerRef.current?.();
       clearTimeout(timeoutRef.current);
+      recognitionRef.current?.abort();
     };
   }, []);
+
+  // ─── Speech-to-Text (Web Speech API) ──────────────────────────────────────────
+  const startListening = useCallback(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      alert('Speech recognition is not supported in this browser. Please use Chrome or Edge.');
+      return;
+    }
+    const recognition = new SpeechRecognition();
+    recognition.lang = 'en-US';
+    recognition.continuous = false;
+    recognition.interimResults = true;
+
+    recognition.onstart  = () => setIsListening(true);
+    recognition.onend    = () => setIsListening(false);
+    recognition.onerror  = () => setIsListening(false);
+    recognition.onresult = (e) => {
+      const transcript = Array.from(e.results)
+        .map(r => r[0].transcript)
+        .join('');
+      setCurrentQuery(transcript);
+    };
+
+    recognitionRef.current = recognition;
+    recognition.start();
+  }, []);
+
+  const stopListening = useCallback(() => {
+    recognitionRef.current?.stop();
+    setIsListening(false);
+  }, []);
+
+  const handleMicClick = () => {
+    if (isListening) stopListening();
+    else startListening();
+  };
 
   // ─── Pin helpers ─────────────────────────────────────────────────────────
   const togglePin = (item) => {
@@ -237,6 +279,7 @@ export default function SatQueryWorkspace({ user, onLogout }) {
     setQueryStatus(null);
     setQueryError(null);
     setIsAnalyzing(false);
+    setSelectedRecentId(null);
   };
 
   const handleSelectRecent = (item) => {
@@ -246,6 +289,7 @@ export default function SatQueryWorkspace({ user, onLogout }) {
     setAnalysisResult(item.result || null);
     setQueryStatus(null);
     setQueryError(null);
+    setSelectedRecentId(item.id);
   };
 
   const handleDeleteRecent = async (e, id) => {
@@ -433,6 +477,43 @@ export default function SatQueryWorkspace({ user, onLogout }) {
   // ─── Filter unpinned recents ─────────────────────────────────────────────
   const unpinnedRecents = recents.filter(r => !isPinned(r.id));
 
+  // ─── Relative time helper ────────────────────────────────────────────────
+  const getRelativeTime = (ts) => {
+    if (!ts) return '';
+    const diff = Date.now() - ts;
+    const m = Math.floor(diff / 60000);
+    if (m < 1)  return 'just now';
+    if (m < 60) return `${m}m ago`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h ago`;
+    const d = Math.floor(h / 24);
+    if (d === 1) return 'yesterday';
+    if (d < 7)  return `${d}d ago`;
+    return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  };
+
+  // ─── Group recents by date ───────────────────────────────────────────────
+  const groupRecentsByDate = (items) => {
+    const now   = Date.now();
+    const today = new Date().setHours(0,0,0,0);
+    const yest  = today - 86400000;
+    const groups = { Today: [], Yesterday: [], Older: [] };
+    items.forEach(item => {
+      const d = item.timestamp || 0;
+      if (d >= today)     groups.Today.push(item);
+      else if (d >= yest) groups.Yesterday.push(item);
+      else                groups.Older.push(item);
+    });
+    return groups;
+  };
+
+  // ─── Task-type dot color ─────────────────────────────────────────────────
+  const taskDotColor = (taskType) => {
+    if (taskType === 'bitemporal') return '#f97316';
+    if (taskType === 'crossmodal') return '#a78bfa';
+    return '#38bdf8';
+  };
+
   // ─── Status Step Icon ─────────────────────────────────────────────────────
   const StatusIcon = ({ type, size = 16 }) => {
     if (type === 'spinner') return <Loader2 size={size} className="spin-icon" />;
@@ -488,36 +569,57 @@ export default function SatQueryWorkspace({ user, onLogout }) {
 
         {/* Recents Section */}
         <div className="sidebar-section recents-section-grow">
-          <div className="section-label">Recents</div>
+          <div className="section-label">History</div>
           <div className="section-list">
             {unpinnedRecents.length === 0 && pinnedItems.length === 0 ? (
               <div className="empty-recents">
-                <p>No recent queries yet</p>
+                <Compass size={22} className="empty-recents-icon" />
+                <p>No queries yet</p>
+                <p>Upload a satellite image and ask your first question to get started.</p>
               </div>
             ) : unpinnedRecents.length === 0 ? (
               <div className="empty-recents"><p>All items pinned</p></div>
             ) : (
-              unpinnedRecents.map((item) => (
-                <div
-                  key={item.id}
-                  className="sidebar-item"
-                  onClick={() => handleSelectRecent(item)}
-                  onMouseEnter={() => setHoveredRecent(item.id)}
-                  onMouseLeave={() => setHoveredRecent(null)}
-                >
-                  <span className="sidebar-item-title">{item.title || item.query}</span>
-                  {hoveredRecent === item.id && (
-                    <div className="sidebar-item-actions">
-                      <button className="action-icon-btn" onClick={(e) => { e.stopPropagation(); togglePin(item); }} title="Pin">
-                        <Pin size={14} />
-                      </button>
-                      <button className="action-icon-btn" onClick={(e) => handleDeleteRecent(e, item.id)} title="Delete">
-                        <Trash2 size={14} />
-                      </button>
+              (() => {
+                const groups = groupRecentsByDate(unpinnedRecents);
+                return Object.entries(groups)
+                  .filter(([, items]) => items.length > 0)
+                  .map(([label, items]) => (
+                    <div key={label}>
+                      <div className="sidebar-date-group">{label}</div>
+                      {items.map((item) => (
+                        <div
+                          key={item.id}
+                          className={`sidebar-item ${selectedRecentId === item.id ? 'active' : ''}`}
+                          onClick={() => handleSelectRecent(item)}
+                          onMouseEnter={() => setHoveredRecent(item.id)}
+                          onMouseLeave={() => setHoveredRecent(null)}
+                        >
+                          <div className="sidebar-item-main">
+                            <span
+                              className="sidebar-item-type-dot"
+                              style={{ background: taskDotColor(item.taskType), boxShadow: `0 0 5px ${taskDotColor(item.taskType)}80` }}
+                            />
+                            <div className="sidebar-item-text">
+                              <span className="sidebar-item-title">{item.title || item.query}</span>
+                              <span className="sidebar-item-time">{getRelativeTime(item.timestamp)}</span>
+                            </div>
+                          </div>
+                          {hoveredRecent === item.id && (
+                            <div className="sidebar-item-actions">
+                              <button className="action-icon-btn" onClick={(e) => { e.stopPropagation(); togglePin(item); }} title="Pin">
+                                <Pin size={14} />
+                              </button>
+                              <button className="action-icon-btn" onClick={(e) => handleDeleteRecent(e, item.id)} title="Delete">
+                                <Trash2 size={14} />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      ))}
                     </div>
-                  )}
-                </div>
-              ))
+                  ));
+              })()
             )}
           </div>
         </div>
@@ -590,21 +692,36 @@ export default function SatQueryWorkspace({ user, onLogout }) {
                 <input
                   type="text"
                   className="query-text-input"
-                  placeholder="Ask about satellite imagery…"
+                  placeholder={isListening ? 'Listening… speak your query' : 'Ask about satellite imagery…'}
                   value={currentQuery}
                   onChange={(e) => setCurrentQuery(e.target.value)}
                   onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleRunAnalysis(); } }}
                   disabled={isAnalyzing}
                 />
 
-                <button
-                  className={`send-query-btn ${(currentQuery.trim() || uploadedImages.length > 0) && !isAnalyzing ? 'active' : ''}`}
-                  onClick={handleRunAnalysis}
-                  disabled={isAnalyzing || (!currentQuery.trim() && uploadedImages.length === 0)}
-                >
-                  <Send size={18} />
-                </button>
+                {/* Mic when no text, Send when text is typed */}
+                {(currentQuery.trim() || uploadedImages.length > 0) ? (
+                  <button
+                    className={`send-query-btn ${!isAnalyzing ? 'active' : ''}`}
+                    onClick={handleRunAnalysis}
+                    disabled={isAnalyzing}
+                    title="Run analysis"
+                  >
+                    <Send size={18} />
+                  </button>
+                ) : (
+                  <button
+                    className={`mic-btn ${isListening ? 'listening' : ''}`}
+                    onClick={handleMicClick}
+                    title={isListening ? 'Stop listening' : 'Speak your query'}
+                  >
+                    {isListening ? <MicOff size={18} /> : <Mic size={18} />}
+                  </button>
+                )}
               </div>
+              {isListening && (
+                <div className="listening-hint">● Recording… pause when done to auto-fill</div>
+              )}
             </div>
 
             {/* Quick preset shortcuts */}
