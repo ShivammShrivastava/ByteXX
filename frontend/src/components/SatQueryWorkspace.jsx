@@ -147,6 +147,8 @@ export default function SatQueryWorkspace({ user, onLogout }) {
   const [activeTab, setActiveTab]           = useState('evidence');
   const [showUploadModal, setShowUploadModal] = useState(false);
   const [isDragging, setIsDragging]         = useState(false);
+  const [dragFileCount, setDragFileCount]   = useState(0);
+  const [dragIsInvalid, setDragIsInvalid]   = useState(false);
   const [activeCrossmodalLayer, setActiveCrossmodalLayer] = useState('optical');
   const [hoveredRecent, setHoveredRecent]   = useState(null);
   const [selectedRecentId, setSelectedRecentId] = useState(null);
@@ -158,6 +160,7 @@ export default function SatQueryWorkspace({ user, onLogout }) {
   const unsubListenerRef = useRef(null);   // Firebase listener cleanup
   const timeoutRef       = useRef(null);   // result timeout handle
   const recognitionRef   = useRef(null);   // Web Speech API instance
+  const dragCounterRef   = useRef(0);      // drag-enter counter to prevent flicker
 
   // ─── Recents subscription ─────────────────────────────────────────────────
   useEffect(() => {
@@ -231,41 +234,113 @@ export default function SatQueryWorkspace({ user, onLogout }) {
   };
   const isPinned = (id) => pinnedItems.some(p => p.id === id);
 
+  // ─── Accepted file types ─────────────────────────────────────────────────
+  const ACCEPTED_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/tiff'];
+  const ACCEPTED_EXTS  = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.tif', '.tiff'];
+
+  const isAcceptedFile = (file) => {
+    const mimeOk = ACCEPTED_TYPES.includes(file.type);
+    const extOk  = ACCEPTED_EXTS.some(ext => file.name.toLowerCase().endsWith(ext));
+    return mimeOk || extOk;
+  };
+
   // ─── Drag & Drop ─────────────────────────────────────────────────────────
-  const handleDragOver  = (e) => { e.preventDefault(); setIsDragging(true); };
-  const handleDragLeave = (e) => { e.preventDefault(); setIsDragging(false); };
-  const handleDrop      = (e) => {
+  // Use a counter to prevent false drag-leave events firing when the pointer
+  // moves over child elements inside the drop zone.
+  const handleDragEnter = (e) => {
     e.preventDefault();
+    dragCounterRef.current += 1;
+    if (dragCounterRef.current === 1) {
+      const items = Array.from(e.dataTransfer.items || []);
+      const count = items.filter(i => i.kind === 'file').length;
+      const hasInvalid = items.some(
+        i => i.kind === 'file' && !ACCEPTED_TYPES.includes(i.type) && i.type !== ''
+      );
+      setDragFileCount(count);
+      setDragIsInvalid(hasInvalid && count > 0);
+      setIsDragging(true);
+    }
+  };
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    // Required to allow drop
+    e.dataTransfer.dropEffect = dragIsInvalid ? 'none' : 'copy';
+  };
+
+  const handleDragLeave = (e) => {
+    e.preventDefault();
+    dragCounterRef.current -= 1;
+    if (dragCounterRef.current === 0) {
+      setIsDragging(false);
+      setDragFileCount(0);
+      setDragIsInvalid(false);
+    }
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    dragCounterRef.current = 0;
     setIsDragging(false);
+    setDragFileCount(0);
+    setDragIsInvalid(false);
     if (e.dataTransfer.files?.length > 0) processSelectedFiles(e.dataTransfer.files);
   };
 
-  const processSelectedFiles = (files) => {
-    const fileList = Array.from(files);
-    const newImages = [];
-    const newFiles  = [];
-
-    fileList.forEach((file) => {
-      const isSAR    = file.name.toLowerCase().includes('sar') || file.name.toLowerCase().includes('risat');
-      const isBefore = file.name.toLowerCase().includes('before') || file.name.toLowerCase().includes('t1');
-      const isAfter  = file.name.toLowerCase().includes('after')  || file.name.toLowerCase().includes('t2');
-      let modality   = 'Optical';
-      if (isSAR)    modality = 'SAR Microwave';
-      else if (isBefore) modality = 'Bi-Temporal T1 (Before)';
-      else if (isAfter)  modality = 'Bi-Temporal T2 (After)';
-
+  // ─── Read a single file as data URL (Promise-based) ──────────────────────
+  const readFileAsDataURL = (file) =>
+    new Promise((resolve, reject) => {
       const reader = new FileReader();
-      reader.onload = (e) => {
-        newImages.push({ name: file.name, url: e.target.result, modality, size: (file.size / 1024).toFixed(1) + ' KB' });
-        newFiles.push(file);
-        if (newImages.length === fileList.length) {
-          setUploadedImages((prev) => [...prev, ...newImages].slice(0, 4));
-          setUploadedFiles((prev)  => [...prev, ...newFiles].slice(0, 4));
-        }
-      };
+      reader.onload  = (e) => resolve(e.target.result);
+      reader.onerror = ()  => reject(new Error(`Failed to read ${file.name}`));
       reader.readAsDataURL(file);
     });
+
+  // ─── Process selected / dropped files ────────────────────────────────────
+  const processSelectedFiles = async (files) => {
+    const fileList = Array.from(files);
+
+    // Filter to accepted types; silently skip unsupported files
+    const validFiles = fileList.filter(isAcceptedFile);
+    if (validFiles.length === 0) return;
+
+    try {
+      // Read all files in parallel — eliminates the race-condition
+      const dataUrls = await Promise.all(validFiles.map(readFileAsDataURL));
+
+      const newImages = validFiles.map((file, i) => {
+        const nameLower = file.name.toLowerCase();
+        const isSAR    = nameLower.includes('sar') || nameLower.includes('risat');
+        const isBefore = nameLower.includes('before') || nameLower.includes('t1');
+        const isAfter  = nameLower.includes('after')  || nameLower.includes('t2');
+        let modality   = 'Optical';
+        if (isSAR)         modality = 'SAR Microwave';
+        else if (isBefore) modality = 'Bi-Temporal T1 (Before)';
+        else if (isAfter)  modality = 'Bi-Temporal T2 (After)';
+        return { name: file.name, url: dataUrls[i], modality, size: (file.size / 1024).toFixed(1) + ' KB' };
+      });
+
+      setUploadedImages((prev) => [...prev, ...newImages].slice(0, 4));
+      setUploadedFiles((prev)  => [...prev, ...validFiles].slice(0, 4));
+    } catch (err) {
+      console.error('Error reading files:', err);
+    }
   };
+
+  // ─── Paste to upload (Ctrl+V images) ─────────────────────────────────────
+  useEffect(() => {
+    const handlePaste = (e) => {
+      const items = Array.from(e.clipboardData?.items || []);
+      const imageFiles = items
+        .filter(item => item.kind === 'file' && isAcceptedFile({ type: item.type, name: item.type.replace('/', '.') }))
+        .map(item => item.getAsFile())
+        .filter(Boolean);
+      if (imageFiles.length > 0) processSelectedFiles(imageFiles);
+    };
+    window.addEventListener('paste', handlePaste);
+    return () => window.removeEventListener('paste', handlePaste);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleLoadPreset = (preset) => {
     setUploadedImages(preset.images);
@@ -666,7 +741,7 @@ export default function SatQueryWorkspace({ user, onLogout }) {
       </aside>
 
       {/* ─── MAIN WORKSPACE ───────────────────────────────────────────── */}
-      <main className="workspace-main" onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}>
+      <main className="workspace-main" onDragEnter={handleDragEnter} onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}>
         {/* Mobile top bar */}
         <div className="mobile-topbar">
           <button
@@ -934,10 +1009,19 @@ export default function SatQueryWorkspace({ user, onLogout }) {
 
         {/* Drag overlay */}
         {isDragging && (
-          <div className="drag-drop-overlay">
-            <UploadCloud size={48} className="drop-icon" />
-            <h3>Drop satellite imagery here</h3>
-            <p>GeoTIFF, TIFF, PNG, JPEG</p>
+          <div className={`drag-drop-overlay${dragIsInvalid ? ' drag-invalid' : ''}`}>
+            <UploadCloud size={52} className="drop-icon" />
+            <h3>{dragIsInvalid ? 'Unsupported file type' : 'Drop satellite imagery here'}</h3>
+            <p>
+              {dragIsInvalid
+                ? 'Please use GeoTIFF, TIFF, PNG, JPEG or WebP'
+                : dragFileCount > 0
+                  ? `${dragFileCount} file${dragFileCount > 1 ? 's' : ''} ready to drop`
+                  : 'GeoTIFF, TIFF, PNG, JPEG, WebP'}
+            </p>
+            {!dragIsInvalid && uploadedImages.length > 0 && uploadedImages.length < 4 && (
+              <span className="drag-slots-hint">{4 - uploadedImages.length} slot{4 - uploadedImages.length > 1 ? 's' : ''} remaining</span>
+            )}
           </div>
         )}
       </main>
