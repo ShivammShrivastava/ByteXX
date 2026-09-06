@@ -1,109 +1,190 @@
-import React from 'react';
-import { X, Mail, User, Calendar, BarChart2, Satellite, LogOut, Shield } from 'lucide-react';
+import React, { useState } from 'react';
+import {
+  X,
+  Mail,
+  User,
+  Calendar,
+  BarChart2,
+  LogOut,
+  Shield,
+  Cpu,
+  Wifi,
+  WifiOff,
+  Pin,
+  Clock,
+  ChevronRight,
+  Copy,
+  Check,
+} from 'lucide-react';
 import './ProfilePanel.css';
 
 export default function ProfilePanel({ user, recentsCount, pinnedCount, onLogout, onClose }) {
+  const [copiedUid, setCopiedUid] = useState(false);
+
   const displayName = user?.displayName || user?.email?.split('@')[0] || 'Analyst';
-  const email = user?.email || 'analyst@bytex.ai';
-  const isDemo = user?.uid?.startsWith('user_') || user?.uid?.startsWith('demo');
-  const avatarUrl = user?.photoURL || `https://api.dicebear.com/7.x/bottts/svg?seed=${user?.uid || 'analyst'}`;
+  const email       = user?.email || 'analyst@bytex.ai';
+  const isDemo      = !user?.email || user?.uid?.startsWith('user_') || user?.uid?.startsWith('demo');
+  const avatarUrl   = user?.photoURL || `https://api.dicebear.com/7.x/bottts/svg?seed=${user?.uid || 'analyst'}`;
 
   const joinDate = (() => {
     if (user?.metadata?.creationTime) {
-      return new Date(user.metadata.creationTime).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+      return new Date(user.metadata.creationTime).toLocaleDateString('en-US', {
+        month: 'long', day: 'numeric', year: 'numeric',
+      });
     }
     return 'Today';
   })();
 
+  const handleCopyUid = () => {
+    if (user?.uid) {
+      navigator.clipboard.writeText(user.uid).catch(() => {});
+      setCopiedUid(true);
+      setTimeout(() => setCopiedUid(false), 2000);
+    }
+  };
+
   return (
-    <div className="profile-overlay" onClick={onClose}>
-      <div className="profile-panel" onClick={(e) => e.stopPropagation()}>
-        {/* Header */}
-        <div className="profile-panel-header">
-          <span className="profile-panel-title">My Profile</span>
-          <button className="profile-close-btn" onClick={onClose}><X size={18} /></button>
+    <div className="profile-page-overlay" onClick={onClose}>
+      <div className="profile-page" onClick={(e) => e.stopPropagation()}>
+
+        {/* ── TOP BAR ── */}
+        <div className="profile-page-topbar">
+          <button className="profile-back-btn" onClick={onClose} aria-label="Close profile">
+            <X size={20} />
+          </button>
+          <span className="profile-page-title">My Profile</span>
+          <div style={{ width: 36 }} />
         </div>
 
-        {/* Avatar + Name */}
-        <div className="profile-hero">
-          <div className="profile-avatar-ring">
-            <img src={avatarUrl} alt={displayName} className="profile-avatar-lg" />
-            {!isDemo && <div className="profile-online-dot"></div>}
-          </div>
-          <div className="profile-hero-info">
-            <h2 className="profile-display-name">{displayName}</h2>
-            <span className={`profile-role-badge ${isDemo ? 'demo' : 'real'}`}>
-              <Shield size={12} />
-              {isDemo ? 'Demo Account' : 'Verified Analyst'}
-            </span>
-          </div>
-        </div>
+        {/* ── SCROLLABLE BODY ── */}
+        <div className="profile-page-body">
 
-        {/* Info Cards */}
-        <div className="profile-info-grid">
-          <div className="profile-info-card">
-            <Mail size={16} className="info-card-icon" />
-            <div>
-              <span className="info-card-label">Email</span>
-              <span className="info-card-value">{email}</span>
+          {/* Hero Avatar Card */}
+          <div className="profile-hero-card">
+            <div className="profile-hero-glow" />
+            <div className="profile-avatar-wrapper">
+              <img src={avatarUrl} alt={displayName} className="profile-avatar-xl" />
+              <div className={`profile-status-ring ${isDemo ? 'demo' : 'online'}`} />
+            </div>
+            <div className="profile-hero-text">
+              <h1 className="profile-hero-name">{displayName}</h1>
+              <span className={`profile-role-badge ${isDemo ? 'demo' : 'real'}`}>
+                <Shield size={11} />
+                {isDemo ? 'Demo Session' : 'Verified Analyst'}
+              </span>
             </div>
           </div>
 
-          <div className="profile-info-card">
-            <User size={16} className="info-card-icon" />
-            <div>
-              <span className="info-card-label">User ID</span>
-              <span className="info-card-value uid-val">{user?.uid?.substring(0, 20)}...</span>
-            </div>
-          </div>
+          {/* ── INFO SECTION ── */}
+          <section className="profile-section">
+            <span className="profile-section-label">Account Info</span>
+            <div className="profile-info-list">
 
-          <div className="profile-info-card">
-            <Calendar size={16} className="info-card-icon" />
-            <div>
-              <span className="info-card-label">Member Since</span>
-              <span className="info-card-value">{joinDate}</span>
-            </div>
-          </div>
+              <div className="profile-info-row">
+                <div className="profile-info-icon-wrap blue">
+                  <Mail size={15} />
+                </div>
+                <div className="profile-info-text">
+                  <span className="profile-info-key">Email</span>
+                  <span className="profile-info-val">{email}</span>
+                </div>
+              </div>
 
-          <div className="profile-info-card">
-            <Satellite size={16} className="info-card-icon" />
-            <div>
-              <span className="info-card-label">Backend Model</span>
-              <span className="info-card-value">Qwen2.5-VL-3B</span>
+              <div className="profile-info-row" onClick={handleCopyUid} style={{ cursor: 'pointer' }}>
+                <div className="profile-info-icon-wrap purple">
+                  <User size={15} />
+                </div>
+                <div className="profile-info-text">
+                  <span className="profile-info-key">User ID</span>
+                  <span className="profile-info-val uid-mono">
+                    {user?.uid ? user.uid.substring(0, 18) + '…' : '—'}
+                  </span>
+                </div>
+                <div className="profile-copy-btn">
+                  {copiedUid ? <Check size={14} className="copy-check" /> : <Copy size={14} />}
+                </div>
+              </div>
+
+              <div className="profile-info-row">
+                <div className="profile-info-icon-wrap green">
+                  <Calendar size={15} />
+                </div>
+                <div className="profile-info-text">
+                  <span className="profile-info-key">Member Since</span>
+                  <span className="profile-info-val">{joinDate}</span>
+                </div>
+              </div>
+
+              <div className="profile-info-row">
+                <div className="profile-info-icon-wrap orange">
+                  <Cpu size={15} />
+                </div>
+                <div className="profile-info-text">
+                  <span className="profile-info-key">Active Model</span>
+                  <span className="profile-info-val">Qwen2.5-VL-3B + LoRA</span>
+                </div>
+              </div>
+
             </div>
-          </div>
+          </section>
+
+          {/* ── STATS SECTION ── */}
+          <section className="profile-section">
+            <span className="profile-section-label">Usage Stats</span>
+            <div className="profile-stats-grid">
+              <div className="profile-stat-card">
+                <BarChart2 size={22} className="stat-card-icon blue" />
+                <span className="stat-card-number">{recentsCount}</span>
+                <span className="stat-card-label">Analyses Run</span>
+              </div>
+              <div className="profile-stat-card">
+                <Pin size={22} className="stat-card-icon purple" />
+                <span className="stat-card-number">{pinnedCount}</span>
+                <span className="stat-card-label">Pinned</span>
+              </div>
+              <div className="profile-stat-card">
+                <Clock size={22} className="stat-card-icon green" />
+                <span className="stat-card-number">3</span>
+                <span className="stat-card-label">Modalities</span>
+              </div>
+            </div>
+          </section>
+
+          {/* ── CONNECTION STATUS ── */}
+          <section className="profile-section">
+            <span className="profile-section-label">Connection</span>
+            <div className="profile-connection-card">
+              <div className={`conn-dot ${isDemo ? 'offline' : 'online'}`} />
+              <div className="conn-text">
+                <span className="conn-title">
+                  {isDemo ? 'Local Demo Session' : 'Firebase RTDB Connected'}
+                </span>
+                <span className="conn-sub">
+                  {isDemo
+                    ? 'Sign in with Google for cloud query history'
+                    : 'satellite-efa0a.firebaseio.com'}
+                </span>
+              </div>
+              {isDemo
+                ? <WifiOff size={18} className="conn-icon offline" />
+                : <Wifi size={18} className="conn-icon online" />
+              }
+            </div>
+          </section>
+
         </div>
 
-        {/* Stats */}
-        <div className="profile-stats-row">
-          <div className="profile-stat">
-            <BarChart2 size={20} className="stat-icon" />
-            <span className="stat-number">{recentsCount}</span>
-            <span className="stat-label">Analyses Run</span>
-          </div>
-          <div className="profile-stat-divider"></div>
-          <div className="profile-stat">
-            <span className="stat-number">{pinnedCount}</span>
-            <span className="stat-label">Pinned Queries</span>
-          </div>
-          <div className="profile-stat-divider"></div>
-          <div className="profile-stat">
-            <span className="stat-number">3</span>
-            <span className="stat-label">Modalities</span>
-          </div>
+        {/* ── BOTTOM LOGOUT BUTTON ── */}
+        <div className="profile-page-footer">
+          <button
+            className="profile-logout-full-btn"
+            onClick={() => { onLogout(); onClose(); }}
+          >
+            <LogOut size={18} />
+            <span>Sign Out</span>
+          </button>
         </div>
 
-        {/* Firebase status */}
-        <div className="profile-firebase-status">
-          <div className={`firebase-dot ${isDemo ? 'offline' : 'online'}`}></div>
-          <span>{isDemo ? 'Local session — register for cloud sync' : 'Synced with Firebase RTDB: satellite-efa0a'}</span>
-        </div>
-
-        {/* Logout */}
-        <button className="profile-logout-btn" onClick={() => { onLogout(); onClose(); }}>
-          <LogOut size={16} />
-          <span>Sign Out</span>
-        </button>
       </div>
     </div>
   );

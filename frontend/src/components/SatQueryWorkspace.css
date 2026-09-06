@@ -297,6 +297,36 @@
   justify-content: space-between;
 }
 
+/* Clickable variant — opens profile page */
+.sidebar-user-footer.clickable-footer {
+  cursor: pointer;
+  border-radius: 10px;
+  padding: 0.55rem 0.5rem;
+  margin-top: 0.15rem;
+  border-top: 1px solid var(--space-border);
+  border-radius: 0;
+  transition: background 0.15s;
+}
+
+.sidebar-user-footer.clickable-footer:hover {
+  background: var(--space-surface-hover);
+}
+
+.sidebar-user-footer.clickable-footer:hover .footer-chevron {
+  color: var(--accent-blue);
+}
+
+.footer-chevron {
+  color: var(--text-muted);
+  transition: color 0.15s, transform 0.2s;
+  flex-shrink: 0;
+}
+
+.sidebar-user-footer.clickable-footer:hover .footer-chevron {
+  transform: translateX(2px);
+}
+
+
 .user-info-card {
   display: flex;
   align-items: center;

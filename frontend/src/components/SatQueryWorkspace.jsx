@@ -25,6 +25,7 @@ import {
   MicOff,
   Menu,
   X,
+  ChevronRight,
 } from 'lucide-react';
 import {
   saveRecentQuery,
@@ -36,6 +37,7 @@ import {
   listenForQueryResult,
 } from '../firebase/firebaseConfig';
 import StarField from './StarField';
+import ProfilePanel from './ProfilePanel';
 import './SatQueryWorkspace.css';
 
 // ─── Preset Datasets (demo / offline fallback) ───────────────────────────────
@@ -150,6 +152,7 @@ export default function SatQueryWorkspace({ user, onLogout }) {
   const [selectedRecentId, setSelectedRecentId] = useState(null);
   const [isListening, setIsListening]       = useState(false);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
+  const [isProfileOpen, setIsProfileOpen]   = useState(false);
 
   const fileInputRef     = useRef(null);
   const unsubListenerRef = useRef(null);   // Firebase listener cleanup
@@ -641,8 +644,15 @@ export default function SatQueryWorkspace({ user, onLogout }) {
           </div>
         </div>
 
-        {/* User footer */}
-        <div className="sidebar-user-footer">
+        {/* User footer — click to open profile page */}
+        <div
+          className="sidebar-user-footer clickable-footer"
+          onClick={() => { setIsMobileSidebarOpen(false); setIsProfileOpen(true); }}
+          title="View profile"
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => e.key === 'Enter' && setIsProfileOpen(true)}
+        >
           <div className="user-info-card">
             <img
               src={user?.photoURL || `https://api.dicebear.com/7.x/bottts/svg?seed=${user?.uid || 'bytex'}`}
@@ -651,9 +661,7 @@ export default function SatQueryWorkspace({ user, onLogout }) {
             />
             <span className="user-name">{user?.displayName || user?.email?.split('@')[0] || 'Analyst'}</span>
           </div>
-          <button className="user-logout-btn" onClick={onLogout} title="Sign Out">
-            <LogOut size={16} />
-          </button>
+          <ChevronRight size={16} className="footer-chevron" />
         </div>
       </aside>
 
@@ -961,6 +969,17 @@ export default function SatQueryWorkspace({ user, onLogout }) {
             </div>
           </div>
         </div>
+      )}
+
+      {/* ─── PROFILE PAGE ─────────────────────────────────────────────── */}
+      {isProfileOpen && (
+        <ProfilePanel
+          user={user}
+          recentsCount={recents.length}
+          pinnedCount={pinnedItems.length}
+          onLogout={onLogout}
+          onClose={() => setIsProfileOpen(false)}
+        />
       )}
     </div>
   );
