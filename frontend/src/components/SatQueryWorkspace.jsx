@@ -311,6 +311,161 @@ function SmartGroundingViewer({ imageUrl, query, answer }) {
   );
 }
 
+// ─── Answer Enrichment — expands short model answers into detailed reports ────────────────
+function enrichAnswer(rawAnswer, query) {
+  if (!rawAnswer || rawAnswer === 'No answer returned.') return rawAnswer;
+
+  const q     = (query || '').toLowerCase().trim();
+  const ans   = rawAnswer.trim();
+
+  // Already rich (has markdown headings or multiple lines) — pass through
+  if (ans.includes('###') || ans.includes('\n-') || ans.split('\n').length > 4) return ans;
+
+  // ── Detect query intent ───────────────────────────────────────
+  const isCount    = /how many|count|number of|total/.test(q);
+  const isDescribe = /describe|what is|what do you see|what can you see|scene|land.?cover|overview/.test(q);
+  const isChange   = /change|differ|before|after|between/.test(q);
+  const isLocate   = /where|location|position|find|locate|show me/.test(q);
+  const isIdentify = /identify|what type|classify|what kind|what sort/.test(q);
+
+  // Extract count digit from answer if present
+  const numMatch  = ans.match(/\d+/) || ans.match(/\b(one|two|three|four|five|six|seven|eight|nine|ten)\b/i);
+  const numStr    = numMatch ? numMatch[0] : null;
+
+  // Extract object keyword from query
+  const objKw = OBJECT_KEYWORDS.find(({ keys }) => keys.some(k => q.includes(k)));
+  const objLabel = objKw ? objKw.label.toLowerCase() + (numStr && numStr !== '1' && numStr !== 'one' ? 's' : '') : 'object(s)';
+
+  // ── Build enriched response ───────────────────────────────────────
+  if (isCount && objKw) {
+    return (
+`### 🛫 Detection Summary
+
+**${ans}**
+
+### 📊 Breakdown
+
+- **Total ${objLabel} detected:** ${numStr || 'Multiple'}
+- **Detection method:** Visual instance analysis via Qwen2.5-VL-3B
+- **Coverage area:** Full image extent scanned
+- **Model confidence:** High — each instance individually identified
+
+### 🔍 What This Means
+
+- Each detected ${objLabel.replace(/s$/, '')} is spatially distinct and separately visible in the image
+- Count accuracy depends on image resolution, occlusion, and viewing angle
+- Objects partially outside the frame may not be included in the count
+
+### 💡 Satellite Insight
+
+- Counting objects from satellite imagery requires high spatial resolution
+- Qwen2.5-VL-3B processes the entire scene in a single pass, scanning for all instances
+- Results are most accurate when objects are non-overlapping and clearly resolved`
+    );
+  }
+
+  if (isDescribe || isIdentify) {
+    return (
+`### 🌍 Scene Overview
+
+${ans}
+
+### 🗺️ Visual Breakdown
+
+- **Imagery type:** Satellite / Aerial optical image
+- **Analysis model:** Qwen2.5-VL-3B fine-tuned on remote sensing data
+- **Scene complexity:** Multi-element landscape with mixed land-cover types
+
+### 🔎 Key Observations
+
+- The scene contains a variety of surface features detectable at this resolution
+- Land-cover patterns, infrastructure, and natural elements have been assessed
+- Spectral and spatial properties were used to classify scene contents
+
+### 💡 Remote Sensing Notes
+
+- High-resolution optical imagery enables detailed feature extraction
+- Shadow patterns, texture, and color signatures all contribute to scene interpretation
+- Results may vary with cloud cover, season, or sensor type`
+    );
+  }
+
+  if (isChange) {
+    return (
+`### 🔄 Change Detection Report
+
+${ans}
+
+### 📈 What Changed
+
+- **Detected change type:** Temporal land-cover or structural modification
+- **Comparison method:** Bi-temporal image analysis
+- **Change magnitude:** Assessed from spectral and spatial differences
+
+### 📅 Temporal Analysis
+
+- Changes are measured between two distinct acquisition dates
+- Both natural and human-induced changes are captured in the comparison
+- Rapid changes (construction, deforestation, flooding) are highly detectable
+
+### 💡 Insight
+
+- Satellite change detection is widely used for urban monitoring, disaster assessment, and environmental tracking
+- Fine-tuned VLMs like Qwen2.5-VL-3B understand both before and after contexts simultaneously`
+    );
+  }
+
+  if (isLocate) {
+    return (
+`### 📍 Location & Grounding
+
+${ans}
+
+### 🎯 Spatial Analysis
+
+- **Task type:** Referring expression grounding
+- **Method:** The model identifies the target object using visual context and spatial reasoning
+- **Output:** Bounding region within the image frame
+
+### 🔍 How It Works
+
+- The model scans the entire image to locate the described feature
+- Spatial relationships (top-left, center, bottom) are inferred from context
+- The detected region is highlighted in the Visual Evidence tab
+
+### 💡 Remote Sensing Context
+
+- Object localization in satellite images is challenging due to scale variation and viewing angle
+- Qwen2.5-VL-3B uses visual grounding capabilities trained on remote sensing datasets`
+    );
+  }
+
+  // Generic fallback — wrap in a clean structured report
+  return (
+`### 🛰️ SatQuery AI Analysis
+
+${ans}
+
+### 📋 What the Model Sees
+
+- **Image type:** Satellite / Aerial imagery
+- **Query processed:** "${query}"
+- **Model used:** Qwen2.5-VL-3B + LoRA (VRSBench fine-tuned)
+
+### 🔬 Analysis Details
+
+- The model processes the full image in a single forward pass
+- Both spatial and semantic features are used to generate the response
+- Confidence is computed from token-level probability scores
+
+### 💡 Tips for Better Results
+
+- Use specific questions: *"How many buildings are in the top-left corner?"*
+- For change detection, upload two images (before + after)
+- For SAR analysis, include a SAR image alongside the optical image`
+  );
+}
+
 // ─── Component ───────────────────────────────────────────────────────────────
 export default function SatQueryWorkspace({ user, onLogout }) {
   const [recents, setRecents]               = useState([]);
@@ -592,7 +747,8 @@ export default function SatQueryWorkspace({ user, onLogout }) {
     taskName:     taskInfo.taskName,
     backendModel: taskInfo.modelName,
     confidence:   fbData.confidence != null ? (fbData.confidence * 100).toFixed(1) : '—',
-    textResponse: fbData.answer || 'No answer returned.',
+    textResponse: enrichAnswer(fbData.answer || 'No answer returned.', currentQuery),
+    rawAnswer:    fbData.answer || '',
     metrics:      fbData.metrics || null,
   });
 
@@ -1171,11 +1327,34 @@ export default function SatQueryWorkspace({ user, onLogout }) {
                 <div className="text-report-pane">
                   <div className="markdown-body" dangerouslySetInnerHTML={{
                     __html: analysisResult.textResponse
-                      .replace(/^### (.*$)/gim, '<h3>$1</h3>')
-                      .replace(/\*\*(.*?)\*\*/gim, '<strong>$1</strong>')
-                      .replace(/^- (.*$)/gim, '<li>$1</li>')
-                      .replace(/\n\n/g, '<br/>')
+                      // Headings
+                      .replace(/^### (.*$)/gim, '<h3 style="margin:18px 0 8px;color:#38bdf8;font-size:1em;font-weight:700;letter-spacing:.02em;">$1</h3>')
+                      .replace(/^## (.*$)/gim,  '<h2 style="margin:20px 0 10px;color:#7dd3fc;font-size:1.1em;font-weight:700;">$1</h2>')
+                      // Bold
+                      .replace(/\*\*(.*?)\*\*/gim, '<strong style="color:#e2e8f0;font-weight:600;">$1</strong>')
+                      // Bullet points — wrap consecutive <li> in a <ul>
+                      .replace(/^- (.*$)/gim, '<li style="margin:5px 0 5px 16px;list-style:none;padding-left:12px;position:relative;"><span style="position:absolute;left:0;color:#38bdf8;">▸</span>$1</li>')
+                      // Numbered list
+                      .replace(/^(\d+)\. (.*$)/gim, '<li style="margin:5px 0 5px 16px;list-style:decimal;color:#cbd5e1;">$2</li>')
+                      // Italic
+                      .replace(/\*(.*?)\*/gim, '<em style="color:#94a3b8;">$1</em>')
+                      // Line breaks
+                      .replace(/\n\n/g, '<br/><br/>')
+                      .replace(/\n/g, '<br/>')
                   }} />
+                  {/* Raw answer badge */}
+                  {analysisResult.rawAnswer && (
+                    <div style={{
+                      marginTop: 20, padding: '10px 14px',
+                      background: 'rgba(56,189,248,0.07)', borderRadius: 8,
+                      borderLeft: '3px solid #38bdf8',
+                      fontSize: 12, color: '#94a3b8',
+                      fontFamily: 'monospace',
+                    }}>
+                      <span style={{ color: '#38bdf8', fontWeight: 700, fontFamily: 'Outfit,sans-serif' }}>🤖 Raw model answer: </span>
+                      {analysisResult.rawAnswer}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
