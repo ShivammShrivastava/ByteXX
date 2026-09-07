@@ -170,6 +170,58 @@ class SatQueryModel:
             "reasoning_trace": f"VQA on {image.size[0]}x{image.size[1]} image. Q: '{question}'",
         }
 
+    def detect_objects(
+        self, image: Image.Image, object_label: str, count_hint: int = 0
+    ) -> dict:
+        """
+        Ask Qwen2.5-VL to locate all instances of `object_label` in the image
+        using its native grounding format.
+
+        Returns:
+            {
+              "answer":     str,          # plain-language count answer
+              "confidence": float,
+              "bboxes":     [[x1,y1,x2,y2], ...],  # normalized 0-1 coords
+              "object":     str,          # the detected class label
+            }
+        """
+        if self._stub_mode:
+            return {"answer": "[STUB] Detection skipped.", "confidence": 0.0,
+                    "bboxes": [], "object": object_label}
+
+        # Grounding prompt: ask Qwen to output bounding boxes
+        prompt = (
+            f"Detect all {object_label}s in this satellite image. "
+            f"For each {object_label} you find, output its bounding box using "
+            f"the format <|box_start|>(x1,y1),(x2,y2)<|box_end|> where coordinates "
+            f"are in 0-1000 scale (0=top/left, 1000=bottom/right). "
+            f"After the boxes, state how many {object_label}s you found."
+        )
+        raw_output, confidence = self._generate(image, prompt, "refer")
+        bboxes  = self._parse_grounding_boxes(raw_output)
+
+        # If grounding format not found, try with angle-bracket legacy format
+        if not bboxes:
+            bboxes = self._parse_legacy_boxes(raw_output)
+
+        # Plain answer: count sentence
+        count = len(bboxes)
+        if count > 0:
+            answer = f"There {'is' if count == 1 else 'are'} {count} {object_label}{'s' if count != 1 else ''} visible in the image."
+        else:
+            # Fall back to running a plain VQA count question
+            count_q = f"How many {object_label}s are visible in this satellite image? Answer with a number."
+            answer, confidence = self._generate(image, count_q, "vqa")
+            bboxes = []
+
+        self._stats["queries"] += 1
+        return {
+            "answer":     answer,
+            "confidence": confidence,
+            "bboxes":     bboxes,
+            "object":     object_label,
+        }
+
     def generate_caption(self, image: Image.Image) -> dict:
         if self._stub_mode:
             return self._stub_response("caption", image, "")
@@ -302,8 +354,44 @@ class SatQueryModel:
         return round(max(0.0, min(1.0, math.exp(mean_log))), 3)
 
     @staticmethod
+    def _parse_grounding_boxes(text: str) -> list:
+        """
+        Parse Qwen2.5-VL native grounding format:
+          <|box_start|>(x1,y1),(x2,y2)<|box_end|>
+        Coordinates are in 0-1000 scale; returned normalized to 0-1.
+        """
+        pattern = r'<\|box_start\|>\((\d+),(\d+)\),\((\d+),(\d+)\)<\|box_end\|>'
+        matches = re.findall(pattern, text)
+        boxes = []
+        for x1, y1, x2, y2 in matches:
+            boxes.append([
+                int(x1) / 1000.0,
+                int(y1) / 1000.0,
+                int(x2) / 1000.0,
+                int(y2) / 1000.0,
+            ])
+        return boxes
+
+    @staticmethod
+    def _parse_legacy_boxes(text: str) -> list:
+        """
+        Parse older Qwen angle-bracket format: <x1><y1><x2><y2>
+        Coordinates in 0-100 scale.
+        """
+        nums = re.findall(r'<(\d+)>', text)
+        boxes = []
+        for i in range(0, len(nums) - 3, 4):
+            boxes.append([
+                int(nums[i])   / 100.0,
+                int(nums[i+1]) / 100.0,
+                int(nums[i+2]) / 100.0,
+                int(nums[i+3]) / 100.0,
+            ])
+        return boxes
+
+    @staticmethod
     def _parse_bbox(text: str) -> Optional[list[float]]:
-        nums = re.findall(r"<(\d+)>", text)
+        nums = re.findall(r'<(\d+)>', text)
         if len(nums) != 4:
             return None
         return [max(0.0, min(1.0, int(n) / 100.0)) for n in nums]

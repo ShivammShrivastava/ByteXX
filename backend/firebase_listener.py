@@ -119,33 +119,55 @@ class FirebaseListener:
             if not self.model_manager.is_loaded:
                 raise RuntimeError("Model not loaded yet")
 
+            bboxes      = []
+            bbox_object = None
+
             if task == "caption":
-                result = self.model_manager.generate_caption(image)
-                answer = result["caption"]
-                confidence = result["confidence"]
-            elif task == "refer":
-                expr = query_data.get("expression", question)
-                result = self.model_manager.locate_object(image, expr)
-                answer = str(result["bbox"]) if result["bbox"] else result["raw_output"]
-                confidence = result["confidence"]
-            else:  # default: vqa
-                result = self.model_manager.answer_vqa(image, question)
-                answer = result["answer"]
+                result     = self.model_manager.generate_caption(image)
+                answer     = result["caption"]
                 confidence = result["confidence"]
 
+            elif task == "refer":
+                expr       = query_data.get("expression", question)
+                result     = self.model_manager.locate_object(image, expr)
+                answer     = str(result["bbox"]) if result["bbox"] else result["raw_output"]
+                confidence = result["confidence"]
+
+            else:  # default: vqa
+                # ── Check if this is an object-counting/detection question ──
+                obj_label = self._detect_object_keyword(question)
+                is_count  = self._is_counting_query(question)
+
+                if is_count and obj_label:
+                    # Use grounding mode to get real bounding boxes
+                    result     = self.model_manager.detect_objects(image, obj_label)
+                    answer     = result["answer"]
+                    confidence = result["confidence"]
+                    bboxes     = result["bboxes"]      # [[x1,y1,x2,y2], ...] in 0-1 range
+                    bbox_object = obj_label
+                else:
+                    result     = self.model_manager.answer_vqa(image, question)
+                    answer     = result["answer"]
+                    confidence = result["confidence"]
+
             # Write result to /results/{queryId}
-            get_db().child(DB_RESULTS_PATH).child(query_id).set({
+            result_payload = {
                 "answer":       answer,
                 "confidence":   round(confidence, 3),
                 "task":         task,
                 "processed_at": int(time.time() * 1000),
-            })
+            }
+            if bboxes:
+                result_payload["bboxes"]      = bboxes
+                result_payload["bbox_object"] = bbox_object
+
+            get_db().child(DB_RESULTS_PATH).child(query_id).set(result_payload)
 
             # Mark query as done
             get_db().child(DB_QUERIES_PATH).child(query_id).update(
                 {"status": "done"}
             )
-            print(f"  Done {query_id}: '{answer[:60]}'")
+            print(f"  Done {query_id}: '{answer[:60]}' | bboxes: {len(bboxes)}")
 
         except Exception as e:
             error_msg = str(e)
@@ -159,6 +181,37 @@ class FirebaseListener:
                 "task":         task,
                 "processed_at": int(time.time() * 1000),
             })
+
+    @staticmethod
+    def _is_counting_query(question: str) -> bool:
+        """Returns True if the question is asking to count or detect objects."""
+        q = question.lower()
+        return any(kw in q for kw in [
+            "how many", "count", "number of", "total", "detect", "find all",
+            "locate all", "identify all", "show all",
+        ])
+
+    @staticmethod
+    def _detect_object_keyword(question: str) -> str | None:
+        """
+        Returns the primary object label if the question mentions a known
+        detectable object type, else None.
+        """
+        q = question.lower()
+        OBJECT_MAP = [
+            (["airplane", "aircraft", "plane", "planes", "airplanes", "jet", "helicopter"], "airplane"),
+            (["car", "cars", "vehicle", "vehicles", "automobile"],                          "car"),
+            (["ship", "ships", "vessel", "vessels", "boat", "boats"],                       "ship"),
+            (["building", "buildings", "structure", "structures", "house"],                 "building"),
+            (["truck", "trucks"],                                                            "truck"),
+            (["tank", "tanks", "storage tank"],                                             "storage tank"),
+            (["bridge", "bridges"],                                                         "bridge"),
+            (["person", "people", "pedestrian", "human"],                                   "person"),
+        ]
+        for keywords, label in OBJECT_MAP:
+            if any(kw in q for kw in keywords):
+                return label
+        return None
 
     @staticmethod
     def _decode_base64_image(b64: str) -> Image.Image:

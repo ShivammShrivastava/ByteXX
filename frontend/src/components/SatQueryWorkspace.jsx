@@ -178,76 +178,117 @@ function generateBoxes(count, objectLabel, query) {
 }
 
 // ─── Smart Grounding Viewer Component ─────────────────────────────────────────
-function SmartGroundingViewer({ imageUrl, query, answer }) {
+function SmartGroundingViewer({ imageUrl, query, answer, bboxes = [], bboxObject = null }) {
   const canvasRef = useRef(null);
   const imgRef    = useRef(null);
 
   // Detect what object type the query is about
-  const qLower = query.toLowerCase();
+  const qLower   = query.toLowerCase();
   const detected = OBJECT_KEYWORDS.find(({ keys }) => keys.some(k => qLower.includes(k)));
 
   // Extract count from model answer
-  const count = detected ? extractCount(answer) : null;
+  const count        = detected ? extractCount(answer) : null;
   const isCountQuery = detected && count !== null && count > 0;
 
-  // Generate box layout
-  const boxes = isCountQuery ? generateBoxes(count, detected.label, query) : [];
+  // ── Decide which boxes to draw ──────────────────────────────────────────────
+  // Priority: 1) Real bboxes from Qwen  2) Seeded-random fallback
+  const hasRealBoxes = Array.isArray(bboxes) && bboxes.length > 0;
+  const objectLabel  = bboxObject || detected?.label || 'Object';
 
-  // Draw boxes on canvas once image loads
+  // Convert real Firebase bboxes [[x1,y1,x2,y2] in 0-1] → canvas-ready format
+  const realBoxes = hasRealBoxes
+    ? bboxes.map((b, i) => ({
+        // b = [x1_norm, y1_norm, x2_norm, y2_norm]  (0–1 range)
+        x1: b[0], y1: b[1], x2: b[2], y2: b[3],
+        label: `${objectLabel} ${i + 1}`,
+        isReal: true,
+      }))
+    : [];
+
+  // Fallback seeded boxes (only used when no real boxes)
+  const fallbackBoxes = (!hasRealBoxes && isCountQuery)
+    ? generateBoxes(count, objectLabel, query).map(b => ({
+        x1: b.left / 100,
+        y1: b.top  / 100,
+        x2: (b.left + b.w) / 100,
+        y2: (b.top  + b.h) / 100,
+        label: b.label,
+        isReal: false,
+      }))
+    : [];
+
+  const activeBoxes  = hasRealBoxes ? realBoxes : fallbackBoxes;
+  const shouldDraw   = activeBoxes.length > 0;
+
+  // Draw boxes on canvas
   const drawBoxes = useCallback(() => {
     const canvas = canvasRef.current;
     const img    = imgRef.current;
-    if (!canvas || !img || !isCountQuery) return;
+    if (!canvas || !img || !shouldDraw) return;
+
     const { width, height } = img.getBoundingClientRect();
     canvas.width  = width;
     canvas.height = height;
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, width, height);
 
-    boxes.forEach(({ top, left, w, h, label }) => {
-      const x  = (left / 100) * width;
-      const y  = (top  / 100) * height;
-      const bw = (w    / 100) * width;
-      const bh = (h    / 100) * height;
+    activeBoxes.forEach(({ x1, y1, x2, y2, label, isReal }) => {
+      const px  = x1 * width;
+      const py  = y1 * height;
+      const bw  = (x2 - x1) * width;
+      const bh  = (y2 - y1) * height;
 
-      // Glowing box
-      ctx.shadowColor   = '#38bdf8';
-      ctx.shadowBlur    = 12;
-      ctx.strokeStyle   = '#38bdf8';
-      ctx.lineWidth     = 2;
-      ctx.strokeRect(x, y, bw, bh);
+      // Color: cyan for real Qwen boxes, amber for fallback
+      const color  = isReal ? '#38bdf8' : '#f59e0b';
+      const glow   = isReal ? '#38bdf888' : '#f59e0b88';
+
+      // Glowing border
+      ctx.shadowColor  = color;
+      ctx.shadowBlur   = 14;
+      ctx.strokeStyle  = color;
+      ctx.lineWidth    = 2;
+      ctx.strokeRect(px, py, bw, bh);
 
       // Corner ticks
-      ctx.shadowBlur  = 0;
+      ctx.shadowBlur   = 0;
       const tick = Math.min(bw, bh) * 0.22;
-      ctx.strokeStyle = '#7dd3fc';
-      ctx.lineWidth   = 2.5;
-      [[x,y,1,0],[x,y,0,1],[x+bw,y,-1,0],[x+bw,y,0,1],[x,y+bh,1,0],[x,y+bh,0,-1],[x+bw,y+bh,-1,0],[x+bw,y+bh,0,-1]]
-        .forEach(([px, py, dx, dy]) => {
-          ctx.beginPath();
-          ctx.moveTo(px, py);
-          ctx.lineTo(px + dx * tick, py + dy * tick);
-          ctx.stroke();
-        });
+      ctx.strokeStyle  = color;
+      ctx.lineWidth    = 2.5;
+      [
+        [px,    py,    1, 0], [px,    py,    0, 1],
+        [px+bw, py,   -1, 0], [px+bw, py,    0, 1],
+        [px,    py+bh, 1, 0], [px,    py+bh, 0,-1],
+        [px+bw, py+bh,-1, 0], [px+bw, py+bh, 0,-1],
+      ].forEach(([qx, qy, dx, dy]) => {
+        ctx.beginPath();
+        ctx.moveTo(qx, qy);
+        ctx.lineTo(qx + dx * tick, qy + dy * tick);
+        ctx.stroke();
+      });
 
       // Label pill
-      ctx.font         = `bold ${Math.max(10, bw * 0.14)}px 'Outfit', sans-serif`;
-      const tw         = ctx.measureText(label).width;
-      const pH = Math.max(16, bw * 0.18);
-      ctx.fillStyle    = 'rgba(14,165,233,0.9)';
+      const fontSize = Math.max(10, Math.min(14, bw * 0.14));
+      ctx.font       = `bold ${fontSize}px 'Outfit', sans-serif`;
+      const tw       = ctx.measureText(label).width;
+      const pH       = fontSize + 6;
+      ctx.fillStyle  = isReal ? 'rgba(14,165,233,0.92)' : 'rgba(245,158,11,0.92)';
       ctx.beginPath();
-      ctx.roundRect(x, y - pH - 3, tw + 12, pH, 4);
+      ctx.roundRect(px, py - pH - 3, tw + 12, pH, 4);
       ctx.fill();
-      ctx.fillStyle    = '#ffffff';
-      ctx.fillText(label, x + 6, y - 7);
+      ctx.fillStyle  = '#ffffff';
+      ctx.shadowBlur = 0;
+      ctx.fillText(label, px + 6, py - 7);
     });
-  }, [boxes, isCountQuery]);
+  }, [activeBoxes, shouldDraw]);
 
   useEffect(() => {
     const img = imgRef.current;
     if (!img) return;
-    if (img.complete) { drawBoxes(); }
-    else { img.addEventListener('load', drawBoxes); return () => img.removeEventListener('load', drawBoxes); }
+    if (img.complete) drawBoxes();
+    else {
+      img.addEventListener('load', drawBoxes);
+      return () => img.removeEventListener('load', drawBoxes);
+    }
   }, [drawBoxes]);
 
   useEffect(() => {
@@ -257,11 +298,13 @@ function SmartGroundingViewer({ imageUrl, query, answer }) {
   }, [drawBoxes]);
 
   // Generic scene labels fallback (non-count queries)
-  const sceneLabels = !isCountQuery && answer ? (() => {
-    const words = answer.split(/[\s,;.]+/).filter(w => w.length > 4);
+  const sceneLabels = !shouldDraw && answer ? (() => {
+    const words  = answer.split(/[\s,;.]+/).filter(w => w.length > 4);
     const unique = [...new Set(words.filter(w => /^[A-Z]/.test(w) || w.length > 6))].slice(0, 2);
     return unique.length >= 2 ? unique : null;
   })() : null;
+
+  const displayCount = hasRealBoxes ? realBoxes.length : (count || 0);
 
   return (
     <div className="single-grounding-viewer">
@@ -273,8 +316,8 @@ function SmartGroundingViewer({ imageUrl, query, answer }) {
           className="grounding-img"
           style={{ display: 'block', width: '100%' }}
         />
-        {/* Canvas overlay for object boxes */}
-        {isCountQuery && (
+        {/* Canvas overlay — real Qwen boxes (cyan) or fallback (amber) */}
+        {shouldDraw && (
           <canvas
             ref={canvasRef}
             style={{
@@ -283,8 +326,8 @@ function SmartGroundingViewer({ imageUrl, query, answer }) {
             }}
           />
         )}
-        {/* HTML fallback boxes for non-count scene description */}
-        {!isCountQuery && sceneLabels && (
+        {/* HTML fallback boxes for pure scene description */}
+        {!shouldDraw && sceneLabels && (
           <>
             <div className="grounding-box box-wetland" style={{ top: '8%', left: '8%', width: '35%', height: '30%' }}>
               <span className="box-tag">{sceneLabels[0]}</span>
@@ -294,22 +337,25 @@ function SmartGroundingViewer({ imageUrl, query, answer }) {
             </div>
           </>
         )}
-        {/* Count summary badge */}
-        {isCountQuery && (
+        {/* Count badge */}
+        {shouldDraw && displayCount > 0 && (
           <div style={{
             position: 'absolute', top: 8, right: 8,
-            background: 'rgba(14,165,233,0.92)', color: '#fff',
-            borderRadius: 8, padding: '4px 12px',
+            background: hasRealBoxes ? 'rgba(14,165,233,0.92)' : 'rgba(245,158,11,0.85)',
+            color: '#fff', borderRadius: 8, padding: '4px 12px',
             fontFamily: 'Outfit, sans-serif', fontSize: 13, fontWeight: 700,
-            boxShadow: '0 0 12px #38bdf888', backdropFilter: 'blur(4px)',
+            boxShadow: `0 0 12px ${hasRealBoxes ? '#38bdf888' : '#f59e0b88'}`,
+            backdropFilter: 'blur(4px)',
           }}>
-            {count} {detected.label}{count !== 1 ? 's' : ''} detected
+            {displayCount} {objectLabel}{displayCount !== 1 ? 's' : ''} detected
+            {!hasRealBoxes && <span style={{ fontSize: 10, opacity: 0.8, marginLeft: 6 }}>(estimated)</span>}
           </div>
         )}
       </div>
     </div>
   );
 }
+
 
 // ─── Answer Enrichment — expands short model answers into detailed reports ────────────────
 function enrichAnswer(rawAnswer, query) {
@@ -749,6 +795,8 @@ export default function SatQueryWorkspace({ user, onLogout }) {
     confidence:   fbData.confidence != null ? (fbData.confidence * 100).toFixed(1) : '—',
     textResponse: enrichAnswer(fbData.answer || 'No answer returned.', currentQuery),
     rawAnswer:    fbData.answer || '',
+    bboxes:       fbData.bboxes      || [],
+    bboxObject:   fbData.bbox_object || null,
     metrics:      fbData.metrics || null,
   });
 
@@ -1305,7 +1353,9 @@ export default function SatQueryWorkspace({ user, onLogout }) {
                     <SmartGroundingViewer
                       imageUrl={uploadedImages[0]?.url || '/samples/optical_sample.jpg'}
                       query={analysisResult.query || ''}
-                      answer={analysisResult.textResponse || ''}
+                      answer={analysisResult.rawAnswer || analysisResult.textResponse || ''}
+                      bboxes={analysisResult.bboxes || []}
+                      bboxObject={analysisResult.bboxObject || null}
                     />
                   )}
 
