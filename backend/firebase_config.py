@@ -11,7 +11,7 @@ from firebase_admin import credentials, db, storage
 
 # ── Firebase config (matches your web app) ──
 FIREBASE_CONFIG = {
-    "apiKey": "AIzaSyDJtjpV4DpD-Ev8BeRJDsfZV4k5U63dpW4",
+    "apiKey": "AIzaSyDJtjpV4DpD-Ev0BeRJDsfZV4k5U63dpW4",
     "authDomain": "satellite-efa0a.firebaseapp.com",
     "projectId": "satellite-efa0a",
     "storageBucket": "satellite-efa0a.firebasestorage.app",

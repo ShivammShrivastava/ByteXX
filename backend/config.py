@@ -7,9 +7,19 @@ Copy backend/.env.example → backend/.env and fill in your values.
 import os
 
 # ─────────────────────────────────────────────
+# HuggingFace Cache — point to local desktop folder
+# ─────────────────────────────────────────────
+# This tells transformers to use the locally downloaded model
+# instead of downloading from the internet.
+_HF_HOME = os.environ.get("HF_HOME", r"C:\Users\IPS\Desktop\huggingface")
+os.environ.setdefault("HF_HOME", _HF_HOME)
+os.environ.setdefault("TRANSFORMERS_CACHE", os.path.join(_HF_HOME, "hub"))
+os.environ.setdefault("HUGGINGFACE_HUB_CACHE", os.path.join(_HF_HOME, "hub"))
+
+# ─────────────────────────────────────────────
 # Model
 # ─────────────────────────────────────────────
-# The base Qwen2.5-VL-3B model from HuggingFace Hub
+# The base Qwen2.5-VL-3B model — uses local cache set above
 BASE_MODEL_NAME = os.environ.get(
     "SATQUERY_BASE_MODEL",
     "Qwen/Qwen2.5-VL-3B-Instruct"
@@ -24,14 +34,13 @@ HF_LORA_REPO = os.environ.get(
 # Local path to a saved LoRA adapter directory (fastest — no download)
 LOCAL_ADAPTER_PATH = os.environ.get(
     "SATQUERY_ADAPTER_PATH",
-    r"C:\Users\IPS\Desktop\Satellite\satquery-ai-vqa-lora"
+    r"C:\Users\IPS\Desktop\satquery-ai-vqa-lora"
 )
 
 # Enable 4-bit NF4 quantization (needs bitsandbytes + CUDA)
 LOAD_IN_4BIT = os.environ.get("SATQUERY_LOAD_4BIT", "true").lower() == "true"
 
-# If set to "stub", the model manager will return placeholder responses
-# without loading Qwen — useful for testing the Firebase pipeline end-to-end.
+# Model mode: "real" loads Qwen2.5-VL-3B + LoRA. "stub" skips it (for pipeline testing).
 MODEL_MODE = os.environ.get("SATQUERY_MODEL_MODE", "real")   # "real" | "stub"
 
 # ─────────────────────────────────────────────
