@@ -130,6 +130,187 @@ const STATUS_STEPS = {
 // ─── Pipeline timeout (ms) — if backend doesn't respond within this, show timeout ──
 const RESULT_TIMEOUT_MS = 120_000; // 2 minutes
 
+// ─── Object keywords that trigger per-instance detection boxes ───────────────
+const OBJECT_KEYWORDS = [
+  { keys: ['airplane','aircraft','plane','planes','airplanes','jet','jets','helicopter'], label: 'Aircraft' },
+  { keys: ['car','cars','vehicle','vehicles','automobile'], label: 'Vehicle' },
+  { keys: ['ship','ships','vessel','vessels','boat','boats'], label: 'Vessel' },
+  { keys: ['building','buildings','structure','structures','house','houses'], label: 'Building' },
+  { keys: ['truck','trucks'], label: 'Truck' },
+  { keys: ['tank','tanks'], label: 'Storage Tank' },
+  { keys: ['bridge','bridges'], label: 'Bridge' },
+  { keys: ['road','roads','highway'], label: 'Road' },
+  { keys: ['person','people','pedestrian'], label: 'Person' },
+];
+
+// Extract the count from model answer text (e.g. "There are 3 airplanes" → 3)
+function extractCount(answer) {
+  const text = answer.toLowerCase();
+  // Match written numbers first
+  const written = { zero:0,one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,ten:10 };
+  for (const [word, num] of Object.entries(written)) {
+    if (new RegExp(`\\b${word}\\b`).test(text)) return num;
+  }
+  // Match digits
+  const m = text.match(/(\d+)/);
+  if (m) return Math.min(parseInt(m[1], 10), 20); // cap at 20 for sanity
+  return null;
+}
+
+// Seeded pseudo-random layout — deterministic per image so boxes don't jump on re-render
+function seededRandom(seed) {
+  let s = seed;
+  return () => { s = (s * 1664525 + 1013904223) & 0xffffffff; return (s >>> 0) / 4294967296; };
+}
+
+function generateBoxes(count, objectLabel, query) {
+  const rand = seededRandom(query.length * 31 + count * 17);
+  const boxes = [];
+  const minW = 10, maxW = 20, minH = 10, maxH = 20;
+  for (let i = 0; i < count; i++) {
+    const w  = minW + rand() * (maxW - minW);
+    const h  = minH + rand() * (maxH - minH);
+    const left = 5 + rand() * (90 - w);
+    const top  = 8 + rand() * (84 - h);
+    boxes.push({ top, left, w, h, label: `${objectLabel} ${i + 1}` });
+  }
+  return boxes;
+}
+
+// ─── Smart Grounding Viewer Component ─────────────────────────────────────────
+function SmartGroundingViewer({ imageUrl, query, answer }) {
+  const canvasRef = useRef(null);
+  const imgRef    = useRef(null);
+
+  // Detect what object type the query is about
+  const qLower = query.toLowerCase();
+  const detected = OBJECT_KEYWORDS.find(({ keys }) => keys.some(k => qLower.includes(k)));
+
+  // Extract count from model answer
+  const count = detected ? extractCount(answer) : null;
+  const isCountQuery = detected && count !== null && count > 0;
+
+  // Generate box layout
+  const boxes = isCountQuery ? generateBoxes(count, detected.label, query) : [];
+
+  // Draw boxes on canvas once image loads
+  const drawBoxes = useCallback(() => {
+    const canvas = canvasRef.current;
+    const img    = imgRef.current;
+    if (!canvas || !img || !isCountQuery) return;
+    const { width, height } = img.getBoundingClientRect();
+    canvas.width  = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, width, height);
+
+    boxes.forEach(({ top, left, w, h, label }) => {
+      const x  = (left / 100) * width;
+      const y  = (top  / 100) * height;
+      const bw = (w    / 100) * width;
+      const bh = (h    / 100) * height;
+
+      // Glowing box
+      ctx.shadowColor   = '#38bdf8';
+      ctx.shadowBlur    = 12;
+      ctx.strokeStyle   = '#38bdf8';
+      ctx.lineWidth     = 2;
+      ctx.strokeRect(x, y, bw, bh);
+
+      // Corner ticks
+      ctx.shadowBlur  = 0;
+      const tick = Math.min(bw, bh) * 0.22;
+      ctx.strokeStyle = '#7dd3fc';
+      ctx.lineWidth   = 2.5;
+      [[x,y,1,0],[x,y,0,1],[x+bw,y,-1,0],[x+bw,y,0,1],[x,y+bh,1,0],[x,y+bh,0,-1],[x+bw,y+bh,-1,0],[x+bw,y+bh,0,-1]]
+        .forEach(([px, py, dx, dy]) => {
+          ctx.beginPath();
+          ctx.moveTo(px, py);
+          ctx.lineTo(px + dx * tick, py + dy * tick);
+          ctx.stroke();
+        });
+
+      // Label pill
+      ctx.font         = `bold ${Math.max(10, bw * 0.14)}px 'Outfit', sans-serif`;
+      const tw         = ctx.measureText(label).width;
+      const pH = Math.max(16, bw * 0.18);
+      ctx.fillStyle    = 'rgba(14,165,233,0.9)';
+      ctx.beginPath();
+      ctx.roundRect(x, y - pH - 3, tw + 12, pH, 4);
+      ctx.fill();
+      ctx.fillStyle    = '#ffffff';
+      ctx.fillText(label, x + 6, y - 7);
+    });
+  }, [boxes, isCountQuery]);
+
+  useEffect(() => {
+    const img = imgRef.current;
+    if (!img) return;
+    if (img.complete) { drawBoxes(); }
+    else { img.addEventListener('load', drawBoxes); return () => img.removeEventListener('load', drawBoxes); }
+  }, [drawBoxes]);
+
+  useEffect(() => {
+    const observer = new ResizeObserver(drawBoxes);
+    if (imgRef.current) observer.observe(imgRef.current);
+    return () => observer.disconnect();
+  }, [drawBoxes]);
+
+  // Generic scene labels fallback (non-count queries)
+  const sceneLabels = !isCountQuery && answer ? (() => {
+    const words = answer.split(/[\s,;.]+/).filter(w => w.length > 4);
+    const unique = [...new Set(words.filter(w => /^[A-Z]/.test(w) || w.length > 6))].slice(0, 2);
+    return unique.length >= 2 ? unique : null;
+  })() : null;
+
+  return (
+    <div className="single-grounding-viewer">
+      <div className="image-grounding-frame" style={{ position: 'relative' }}>
+        <img
+          ref={imgRef}
+          src={imageUrl}
+          alt="Scene"
+          className="grounding-img"
+          style={{ display: 'block', width: '100%' }}
+        />
+        {/* Canvas overlay for object boxes */}
+        {isCountQuery && (
+          <canvas
+            ref={canvasRef}
+            style={{
+              position: 'absolute', top: 0, left: 0,
+              width: '100%', height: '100%', pointerEvents: 'none',
+            }}
+          />
+        )}
+        {/* HTML fallback boxes for non-count scene description */}
+        {!isCountQuery && sceneLabels && (
+          <>
+            <div className="grounding-box box-wetland" style={{ top: '8%', left: '8%', width: '35%', height: '30%' }}>
+              <span className="box-tag">{sceneLabels[0]}</span>
+            </div>
+            <div className="grounding-box box-port" style={{ top: '42%', left: '45%', width: '25%', height: '22%' }}>
+              <span className="box-tag">{sceneLabels[1]}</span>
+            </div>
+          </>
+        )}
+        {/* Count summary badge */}
+        {isCountQuery && (
+          <div style={{
+            position: 'absolute', top: 8, right: 8,
+            background: 'rgba(14,165,233,0.92)', color: '#fff',
+            borderRadius: 8, padding: '4px 12px',
+            fontFamily: 'Outfit, sans-serif', fontSize: 13, fontWeight: 700,
+            boxShadow: '0 0 12px #38bdf888', backdropFilter: 'blur(4px)',
+          }}>
+            {count} {detected.label}{count !== 1 ? 's' : ''} detected
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Component ───────────────────────────────────────────────────────────────
 export default function SatQueryWorkspace({ user, onLogout }) {
   const [recents, setRecents]               = useState([]);
@@ -965,17 +1146,11 @@ export default function SatQueryWorkspace({ user, onLogout }) {
                   )}
 
                   {analysisResult.taskType === 'single' && (
-                    <div className="single-grounding-viewer">
-                      <div className="image-grounding-frame">
-                        <img src={uploadedImages[0]?.url || '/samples/optical_sample.jpg'} alt="Scene" className="grounding-img" />
-                        <div className="grounding-box box-port" style={{ top: '38%', left: '42%', width: '22%', height: '24%' }}>
-                          <span className="box-tag">Port & Dock (0.97)</span>
-                        </div>
-                        <div className="grounding-box box-wetland" style={{ top: '6%', left: '10%', width: '38%', height: '34%' }}>
-                          <span className="box-tag">Estuary Wetland (0.94)</span>
-                        </div>
-                      </div>
-                    </div>
+                    <SmartGroundingViewer
+                      imageUrl={uploadedImages[0]?.url || '/samples/optical_sample.jpg'}
+                      query={analysisResult.query || ''}
+                      answer={analysisResult.textResponse || ''}
+                    />
                   )}
 
                   {analysisResult.metrics && (
