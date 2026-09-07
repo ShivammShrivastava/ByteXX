@@ -139,12 +139,21 @@ class FirebaseListener:
                 is_count  = self._is_counting_query(question)
 
                 if is_count and obj_label:
-                    # Use grounding mode to get real bounding boxes
-                    result     = self.model_manager.detect_objects(image, obj_label)
-                    answer     = result["answer"]
-                    confidence = result["confidence"]
-                    bboxes     = result["bboxes"]      # [[x1,y1,x2,y2], ...] in 0-1 range
-                    bbox_object = obj_label
+                    # Step 1: VQA for the CORRECT text answer to the user's question
+                    vqa_result = self.model_manager.answer_vqa(image, question)
+                    answer     = vqa_result["answer"]
+                    confidence = vqa_result["confidence"]
+
+                    # Step 2: Separate detection pass for real bounding boxes
+                    try:
+                        detect_result = self.model_manager.detect_objects(image, obj_label)
+                        bboxes        = detect_result["bboxes"]
+                        bbox_object   = obj_label
+                        print(f"  Detection found {len(bboxes)} {obj_label}(s)")
+                    except Exception as det_err:
+                        print(f"  Detection failed ({det_err}) — visual boxes skipped")
+                        bboxes      = []
+                        bbox_object = None
                 else:
                     result     = self.model_manager.answer_vqa(image, question)
                     answer     = result["answer"]

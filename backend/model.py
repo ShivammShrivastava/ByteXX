@@ -183,13 +183,17 @@ class SatQueryModel:
 
         # Step 1 — Ask Qwen for bounding boxes in a simple parseable format
         prompt = (
-            f"You are analyzing a satellite/aerial image. "
-            f"Find and locate every {object_label} visible in this image. "
-            f"For EACH {object_label} you find, output its bounding box on a new line in this EXACT format:\n"
+            f"Task: Detect ALL {object_label}s in this satellite/aerial image. "
+            f"Scan the ENTIRE image carefully — do NOT stop after the first one. "
+            f"For EVERY {object_label} you see (even partially visible ones), "
+            f"output one line per object in this EXACT format:\n"
             f"BBOX: [x1, y1, x2, y2]\n"
-            f"where x1,y1 is the top-left corner and x2,y2 is the bottom-right corner, "
-            f"with values from 0 to 1000 (0=top/left edge, 1000=bottom/right edge). "
-            f"After listing all boxes, write the total count."
+            f"Coordinates are 0-1000 (top-left=0,0 bottom-right=1000,1000). "
+            f"Example for 3 objects:\n"
+            f"BBOX: [120, 80, 280, 200]\n"
+            f"BBOX: [450, 300, 620, 430]\n"
+            f"BBOX: [700, 150, 850, 280]\n"
+            f"Now detect all {object_label}s and list every BBOX:"
         )
         raw_output, confidence = self._generate(image, prompt, "refer")
         bboxes = self._parse_plain_bboxes(raw_output)
