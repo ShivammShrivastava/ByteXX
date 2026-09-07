@@ -191,34 +191,20 @@ function SmartGroundingViewer({ imageUrl, query, answer, bboxes = [], bboxObject
   const isCountQuery = detected && count !== null && count > 0;
 
   // ── Decide which boxes to draw ──────────────────────────────────────────────
-  // Priority: 1) Real bboxes from Qwen  2) Seeded-random fallback
+  // ONLY use real bboxes from Qwen. Never show random/fake positions.
   const hasRealBoxes = Array.isArray(bboxes) && bboxes.length > 0;
   const objectLabel  = bboxObject || detected?.label || 'Object';
 
   // Convert real Firebase bboxes [[x1,y1,x2,y2] in 0-1] → canvas-ready format
   const realBoxes = hasRealBoxes
     ? bboxes.map((b, i) => ({
-        // b = [x1_norm, y1_norm, x2_norm, y2_norm]  (0–1 range)
         x1: b[0], y1: b[1], x2: b[2], y2: b[3],
         label: `${objectLabel} ${i + 1}`,
-        isReal: true,
       }))
     : [];
 
-  // Fallback seeded boxes (only used when no real boxes)
-  const fallbackBoxes = (!hasRealBoxes && isCountQuery)
-    ? generateBoxes(count, objectLabel, query).map(b => ({
-        x1: b.left / 100,
-        y1: b.top  / 100,
-        x2: (b.left + b.w) / 100,
-        y2: (b.top  + b.h) / 100,
-        label: b.label,
-        isReal: false,
-      }))
-    : [];
-
-  const activeBoxes  = hasRealBoxes ? realBoxes : fallbackBoxes;
-  const shouldDraw   = activeBoxes.length > 0;
+  const activeBoxes = realBoxes;
+  const shouldDraw  = activeBoxes.length > 0;
 
   // Draw boxes on canvas
   const drawBoxes = useCallback(() => {
@@ -232,27 +218,23 @@ function SmartGroundingViewer({ imageUrl, query, answer, bboxes = [], bboxObject
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, width, height);
 
-    activeBoxes.forEach(({ x1, y1, x2, y2, label, isReal }) => {
+    activeBoxes.forEach(({ x1, y1, x2, y2, label }) => {
       const px  = x1 * width;
       const py  = y1 * height;
       const bw  = (x2 - x1) * width;
       const bh  = (y2 - y1) * height;
 
-      // Color: cyan for real Qwen boxes, amber for fallback
-      const color  = isReal ? '#38bdf8' : '#f59e0b';
-      const glow   = isReal ? '#38bdf888' : '#f59e0b88';
-
-      // Glowing border
-      ctx.shadowColor  = color;
+      // Cyan glowing border — all boxes are real Qwen coordinates
+      ctx.shadowColor  = '#38bdf8';
       ctx.shadowBlur   = 14;
-      ctx.strokeStyle  = color;
+      ctx.strokeStyle  = '#38bdf8';
       ctx.lineWidth    = 2;
       ctx.strokeRect(px, py, bw, bh);
 
       // Corner ticks
       ctx.shadowBlur   = 0;
       const tick = Math.min(bw, bh) * 0.22;
-      ctx.strokeStyle  = color;
+      ctx.strokeStyle  = '#7dd3fc';
       ctx.lineWidth    = 2.5;
       [
         [px,    py,    1, 0], [px,    py,    0, 1],
@@ -267,17 +249,17 @@ function SmartGroundingViewer({ imageUrl, query, answer, bboxes = [], bboxObject
       });
 
       // Label pill
-      const fontSize = Math.max(10, Math.min(14, bw * 0.14));
+      const fontSize = Math.max(10, Math.min(13, bw * 0.14));
       ctx.font       = `bold ${fontSize}px 'Outfit', sans-serif`;
       const tw       = ctx.measureText(label).width;
       const pH       = fontSize + 6;
-      ctx.fillStyle  = isReal ? 'rgba(14,165,233,0.92)' : 'rgba(245,158,11,0.92)';
+      ctx.fillStyle  = 'rgba(14,165,233,0.92)';
       ctx.beginPath();
-      ctx.roundRect(px, py - pH - 3, tw + 12, pH, 4);
+      ctx.roundRect(px, Math.max(pH + 3, py) - pH - 3, tw + 12, pH, 4);
       ctx.fill();
       ctx.fillStyle  = '#ffffff';
       ctx.shadowBlur = 0;
-      ctx.fillText(label, px + 6, py - 7);
+      ctx.fillText(label, px + 6, Math.max(pH + 3, py) - 7);
     });
   }, [activeBoxes, shouldDraw]);
 
@@ -297,15 +279,6 @@ function SmartGroundingViewer({ imageUrl, query, answer, bboxes = [], bboxObject
     return () => observer.disconnect();
   }, [drawBoxes]);
 
-  // Generic scene labels fallback (non-count queries)
-  const sceneLabels = !shouldDraw && answer ? (() => {
-    const words  = answer.split(/[\s,;.]+/).filter(w => w.length > 4);
-    const unique = [...new Set(words.filter(w => /^[A-Z]/.test(w) || w.length > 6))].slice(0, 2);
-    return unique.length >= 2 ? unique : null;
-  })() : null;
-
-  const displayCount = hasRealBoxes ? realBoxes.length : (count || 0);
-
   return (
     <div className="single-grounding-viewer">
       <div className="image-grounding-frame" style={{ position: 'relative' }}>
@@ -316,7 +289,7 @@ function SmartGroundingViewer({ imageUrl, query, answer, bboxes = [], bboxObject
           className="grounding-img"
           style={{ display: 'block', width: '100%' }}
         />
-        {/* Canvas overlay — real Qwen boxes (cyan) or fallback (amber) */}
+        {/* Canvas — real Qwen bounding boxes (cyan) */}
         {shouldDraw && (
           <canvas
             ref={canvasRef}
@@ -326,29 +299,28 @@ function SmartGroundingViewer({ imageUrl, query, answer, bboxes = [], bboxObject
             }}
           />
         )}
-        {/* HTML fallback boxes for pure scene description */}
-        {!shouldDraw && sceneLabels && (
-          <>
-            <div className="grounding-box box-wetland" style={{ top: '8%', left: '8%', width: '35%', height: '30%' }}>
-              <span className="box-tag">{sceneLabels[0]}</span>
-            </div>
-            <div className="grounding-box box-port" style={{ top: '42%', left: '45%', width: '25%', height: '22%' }}>
-              <span className="box-tag">{sceneLabels[1]}</span>
-            </div>
-          </>
+        {/* When no real boxes: show the model's text answer as a clean overlay */}
+        {!shouldDraw && answer && (
+          <div style={{
+            position: 'absolute', bottom: 10, left: 10, right: 10,
+            background: 'rgba(15,23,42,0.85)', backdropFilter: 'blur(8px)',
+            borderRadius: 8, padding: '10px 14px', border: '1px solid rgba(56,189,248,0.2)',
+            color: '#e2e8f0', fontFamily: 'Outfit, sans-serif', fontSize: 13, lineHeight: 1.5,
+          }}>
+            <span style={{ color: '#38bdf8', fontWeight: 700, marginRight: 6 }}>🤖</span>
+            {answer.split('\n')[0]}
+          </div>
         )}
-        {/* Count badge */}
-        {shouldDraw && displayCount > 0 && (
+        {/* Real bbox count badge */}
+        {shouldDraw && (
           <div style={{
             position: 'absolute', top: 8, right: 8,
-            background: hasRealBoxes ? 'rgba(14,165,233,0.92)' : 'rgba(245,158,11,0.85)',
-            color: '#fff', borderRadius: 8, padding: '4px 12px',
+            background: 'rgba(14,165,233,0.92)', color: '#fff',
+            borderRadius: 8, padding: '4px 12px',
             fontFamily: 'Outfit, sans-serif', fontSize: 13, fontWeight: 700,
-            boxShadow: `0 0 12px ${hasRealBoxes ? '#38bdf888' : '#f59e0b88'}`,
-            backdropFilter: 'blur(4px)',
+            boxShadow: '0 0 12px #38bdf888', backdropFilter: 'blur(4px)',
           }}>
-            {displayCount} {objectLabel}{displayCount !== 1 ? 's' : ''} detected
-            {!hasRealBoxes && <span style={{ fontSize: 10, opacity: 0.8, marginLeft: 6 }}>(estimated)</span>}
+            {activeBoxes.length} {objectLabel}{activeBoxes.length !== 1 ? 's' : ''} detected
           </div>
         )}
       </div>

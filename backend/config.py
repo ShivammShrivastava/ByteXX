@@ -46,9 +46,9 @@ MODEL_MODE = os.environ.get("SATQUERY_MODEL_MODE", "real")   # "real" | "stub"
 # ─────────────────────────────────────────────
 # Generation
 # ─────────────────────────────────────────────
-MAX_NEW_TOKENS_VQA     = int(os.environ.get("SATQUERY_MAX_TOKENS_VQA",     "64"))
+MAX_NEW_TOKENS_VQA     = int(os.environ.get("SATQUERY_MAX_TOKENS_VQA",     "128"))
 MAX_NEW_TOKENS_CAPTION = int(os.environ.get("SATQUERY_MAX_TOKENS_CAPTION", "256"))
-MAX_NEW_TOKENS_REFER   = int(os.environ.get("SATQUERY_MAX_TOKENS_REFER",   "32"))
+MAX_NEW_TOKENS_REFER   = int(os.environ.get("SATQUERY_MAX_TOKENS_REFER",   "512"))
 TEMPERATURE            = float(os.environ.get("SATQUERY_TEMPERATURE",      "0.1"))
 DO_SAMPLE              = os.environ.get("SATQUERY_DO_SAMPLE", "false").lower() == "true"
 

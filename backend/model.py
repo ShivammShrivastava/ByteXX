@@ -174,43 +174,45 @@ class SatQueryModel:
         self, image: Image.Image, object_label: str, count_hint: int = 0
     ) -> dict:
         """
-        Ask Qwen2.5-VL to locate all instances of `object_label` in the image
-        using its native grounding format.
-
-        Returns:
-            {
-              "answer":     str,          # plain-language count answer
-              "confidence": float,
-              "bboxes":     [[x1,y1,x2,y2], ...],  # normalized 0-1 coords
-              "object":     str,          # the detected class label
-            }
+        Ask Qwen2.5-VL to locate all instances of `object_label` in the image.
+        Returns normalized [0-1] bounding boxes alongside the answer.
         """
         if self._stub_mode:
             return {"answer": "[STUB] Detection skipped.", "confidence": 0.0,
                     "bboxes": [], "object": object_label}
 
-        # Grounding prompt: ask Qwen to output bounding boxes
+        # Step 1 — Ask Qwen for bounding boxes in a simple parseable format
         prompt = (
-            f"Detect all {object_label}s in this satellite image. "
-            f"For each {object_label} you find, output its bounding box using "
-            f"the format <|box_start|>(x1,y1),(x2,y2)<|box_end|> where coordinates "
-            f"are in 0-1000 scale (0=top/left, 1000=bottom/right). "
-            f"After the boxes, state how many {object_label}s you found."
+            f"You are analyzing a satellite/aerial image. "
+            f"Find and locate every {object_label} visible in this image. "
+            f"For EACH {object_label} you find, output its bounding box on a new line in this EXACT format:\n"
+            f"BBOX: [x1, y1, x2, y2]\n"
+            f"where x1,y1 is the top-left corner and x2,y2 is the bottom-right corner, "
+            f"with values from 0 to 1000 (0=top/left edge, 1000=bottom/right edge). "
+            f"After listing all boxes, write the total count."
         )
         raw_output, confidence = self._generate(image, prompt, "refer")
-        bboxes  = self._parse_grounding_boxes(raw_output)
+        bboxes = self._parse_plain_bboxes(raw_output)
 
-        # If grounding format not found, try with angle-bracket legacy format
+        # Also try Qwen native grounding format if plain text parsing failed
+        if not bboxes:
+            bboxes = self._parse_grounding_boxes(raw_output)
         if not bboxes:
             bboxes = self._parse_legacy_boxes(raw_output)
 
-        # Plain answer: count sentence
+        # Build answer sentence
         count = len(bboxes)
         if count > 0:
-            answer = f"There {'is' if count == 1 else 'are'} {count} {object_label}{'s' if count != 1 else ''} visible in the image."
+            answer = (
+                f"There {'is' if count == 1 else 'are'} {count} "
+                f"{object_label}{'s' if count != 1 else ''} visible in the image."
+            )
         else:
-            # Fall back to running a plain VQA count question
-            count_q = f"How many {object_label}s are visible in this satellite image? Answer with a number."
+            # Fallback: plain VQA count question (no boxes)
+            count_q = (
+                f"How many {object_label}s are visible in this satellite image? "
+                f"Answer with a number only."
+            )
             answer, confidence = self._generate(image, count_q, "vqa")
             bboxes = []
 
@@ -352,6 +354,24 @@ class SatQueryModel:
             return 0.5
         mean_log = sum(math.log(max(p, 1e-10)) for p in token_probs) / len(token_probs)
         return round(max(0.0, min(1.0, math.exp(mean_log))), 3)
+
+    @staticmethod
+    def _parse_plain_bboxes(text: str) -> list:
+        """
+        Parse simple plain-text format: BBOX: [x1, y1, x2, y2]
+        Coordinates in 0-1000 scale, returned normalized to 0-1.
+        """
+        pattern = r'BBOX:\s*\[(\d+(?:\.\d+)?),\s*(\d+(?:\.\d+)?),\s*(\d+(?:\.\d+)?),\s*(\d+(?:\.\d+)?)\]'
+        matches = re.findall(pattern, text, re.IGNORECASE)
+        boxes = []
+        for x1, y1, x2, y2 in matches:
+            boxes.append([
+                float(x1) / 1000.0,
+                float(y1) / 1000.0,
+                float(x2) / 1000.0,
+                float(y2) / 1000.0,
+            ])
+        return boxes
 
     @staticmethod
     def _parse_grounding_boxes(text: str) -> list:
