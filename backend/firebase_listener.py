@@ -234,7 +234,33 @@ class FirebaseListener:
         """Handle full AI Agent pipeline — writes to /agent_results/."""
         question = query_data.get("question", "")
 
-        from AI_Agents.agent import sat_agent
+        # AI_Agents is registered by main.py's startup block; fall back to
+        # direct sys.modules lookup so the listener thread also finds it.
+        import sys
+        if "AI_Agents.agent" in sys.modules:
+            agent_mod = sys.modules["AI_Agents.agent"]
+        else:
+            # Fallback: register manually (same logic as main.py)
+            import importlib.util as _ilu
+            from pathlib import Path
+            _ai_dir = Path(__file__).resolve().parent.parent / "AI Agents"
+            if "AI_Agents" not in sys.modules:
+                _pkg_spec = _ilu.spec_from_file_location(
+                    "AI_Agents", _ai_dir / "__init__.py",
+                    submodule_search_locations=[str(_ai_dir)],
+                )
+                _pkg_mod = _ilu.module_from_spec(_pkg_spec)
+                sys.modules["AI_Agents"] = _pkg_mod
+                for _sub in ["router", "planner", "tools", "executor", "verifier", "merger", "agent"]:
+                    _ss = _ilu.spec_from_file_location(f"AI_Agents.{_sub}", _ai_dir / f"{_sub}.py")
+                    if _ss:
+                        _sm = _ilu.module_from_spec(_ss)
+                        sys.modules[f"AI_Agents.{_sub}"] = _sm
+                        _ss.loader.exec_module(_sm)
+                _pkg_spec.loader.exec_module(_pkg_mod)
+            agent_mod = sys.modules["AI_Agents.agent"]
+
+        sat_agent = agent_mod.sat_agent
 
         # Run the async agent pipeline in our dedicated event loop
         report = self._loop.run_until_complete(

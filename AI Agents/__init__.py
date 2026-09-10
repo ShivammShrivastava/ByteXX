@@ -17,6 +17,9 @@ Usage:
     report = await sat_agent.run(image, question)
 """
 
-from AI_Agents.agent import SatAgent, sat_agent
+# NOTE: Do NOT import SatAgent/sat_agent here.
+# Sub-modules are loaded individually by main.py's importlib.util block
+# to handle the folder name with a space ("AI Agents").
+# Importing here would create a circular dependency during that bootstrap.
 
 __all__ = ["SatAgent", "sat_agent"]

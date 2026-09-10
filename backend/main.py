@@ -48,27 +48,34 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-# Alias "AI Agents" → AI_Agents so Python can import it
+# Alias "AI Agents" (folder with space) → AI_Agents so Python can import it
 if "AI_Agents" not in sys.modules:
-    import importlib.util
-    _spec = importlib.util.spec_from_file_location(
+    import importlib.util as _ilu
+
+    _ai_dir = _ROOT / "AI Agents"
+
+    # Register the package namespace first (without executing it yet)
+    _pkg_spec = _ilu.spec_from_file_location(
         "AI_Agents",
-        _ROOT / "AI Agents" / "__init__.py",
-        submodule_search_locations=[str(_ROOT / "AI Agents")],
+        _ai_dir / "__init__.py",
+        submodule_search_locations=[str(_ai_dir)],
     )
-    if _spec:
-        _mod = importlib.util.module_from_spec(_spec)
-        sys.modules["AI_Agents"] = _mod
-        # Register all sub-modules so relative imports work
-        for _sub in ["router", "planner", "tools", "executor", "verifier", "merger", "agent"]:
-            _sspec = importlib.util.spec_from_file_location(
-                f"AI_Agents.{_sub}",
-                _ROOT / "AI Agents" / f"{_sub}.py",
-            )
-            if _sspec:
-                _smod = importlib.util.module_from_spec(_sspec)
-                sys.modules[f"AI_Agents.{_sub}"] = _smod
-        _spec.loader.exec_module(_mod)
+    _pkg_mod = _ilu.module_from_spec(_pkg_spec)
+    sys.modules["AI_Agents"] = _pkg_mod
+
+    # Register AND exec each sub-module in import-dependency order
+    for _sub in ["router", "planner", "tools", "executor", "verifier", "merger", "agent"]:
+        _sub_spec = _ilu.spec_from_file_location(
+            f"AI_Agents.{_sub}",
+            _ai_dir / f"{_sub}.py",
+        )
+        if _sub_spec:
+            _sub_mod = _ilu.module_from_spec(_sub_spec)
+            sys.modules[f"AI_Agents.{_sub}"] = _sub_mod
+            _sub_spec.loader.exec_module(_sub_mod)   # ← execute each sub-module
+
+    # Now execute the __init__ (its imports will resolve from sys.modules)
+    _pkg_spec.loader.exec_module(_pkg_mod)
 
 from backend.config import API_HOST, API_PORT, CORS_ORIGINS, MAX_IMAGE_SIZE_MB
 from backend.schemas import (
