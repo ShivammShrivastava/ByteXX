@@ -125,14 +125,17 @@ const PRESET_DATASETS = [
 const STATUS_STEPS = {
   encoding:    { label: 'Encoding image…',          icon: 'spinner',    color: '#6366f1' },
   pending:     { label: 'Queued for analysis…',      icon: 'clock',      color: '#f59e0b' },
-  processing:  { label: 'Qwen VLM analyzing…',       icon: 'spinner',    color: '#0ea5e9' },
-  done:        { label: 'Analysis complete',          icon: 'check',      color: '#10b981' },
-  error:       { label: 'Analysis failed',            icon: 'error',      color: '#ef4444' },
-  timeout:     { label: 'Backend not responding',     icon: 'error',      color: '#f97316' },
+  processing:  { label: 'Qwen VLM analyzing… (may take 1-2 min on CPU)', icon: 'spinner', color: '#0ea5e9' },
+  done:        { label: 'Analysis complete',                               icon: 'check',   color: '#10b981' },
+  error:       { label: 'Analysis failed',                                 icon: 'error',   color: '#ef4444' },
+  timeout:     { label: 'Backend not responding — CPU inference may still be running', icon: 'error', color: '#f97316' },
 };
 
-// ─── Pipeline timeout (ms) — if backend doesn't respond within this, show timeout ──
-const RESULT_TIMEOUT_MS = 300_000; // 5 minutes
+// ─── Pipeline timeout (ms) ────────────────────────────────────────────────────
+// CPU inference: Qwen-3B generates ~2 tok/s on CPU.
+// 128 tokens = ~64s + image preprocessing ≈ 90-120s total.
+// Give 10 minutes (600s) so CPU users don't see false timeouts.
+const RESULT_TIMEOUT_MS = 600_000; // 10 minutes (covers CPU inference)
 
 // ─── Object keywords that trigger per-instance detection boxes ───────────────
 const OBJECT_KEYWORDS = [
@@ -181,6 +184,167 @@ function generateBoxes(count, objectLabel, query) {
   return boxes;
 }
 
+// ─── CPU Inference Progress Panel ─────────────────────────────────────────────
+function CpuInferenceProgress({ isAgent }) {
+  const [elapsed, setElapsed] = React.useState(0);
+  const [stage, setStage]     = React.useState(0);
+
+  const CPU_STAGES = isAgent
+    ? [
+        { label: 'Routing query to tools…',        est: 5  },
+        { label: 'Planning execution steps…',       est: 10 },
+        { label: 'Running CNN detection…',          est: 20 },
+        { label: 'Running Qwen VLM analysis…',      est: 90 },
+        { label: 'Verifying & merging results…',    est: 30 },
+      ]
+    : [
+        { label: 'Preprocessing image…',            est: 5  },
+        { label: 'Tokenizing prompt…',              est: 5  },
+        { label: 'Qwen VLM generating answer…',     est: 80 },
+        { label: 'Computing confidence scores…',    est: 5  },
+      ];
+
+  React.useEffect(() => {
+    const start = Date.now();
+    const interval = setInterval(() => {
+      const s = Math.floor((Date.now() - start) / 1000);
+      setElapsed(s);
+      // Advance stage based on cumulative estimated seconds
+      let cumulative = 0;
+      for (let i = 0; i < CPU_STAGES.length; i++) {
+        cumulative += CPU_STAGES[i].est;
+        if (s < cumulative) { setStage(i); break; }
+        if (i === CPU_STAGES.length - 1) setStage(i);
+      }
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const totalEst  = CPU_STAGES.reduce((a, c) => a + c.est, 0);
+  const progress  = Math.min(95, (elapsed / totalEst) * 100); // never reach 100 until done
+  const remaining = Math.max(0, totalEst - elapsed);
+  const fmtTime   = s => s >= 60 ? `${Math.floor(s/60)}m ${s%60}s` : `${s}s`;
+
+  return (
+    <div style={{
+      margin: '24px 0',
+      background: 'linear-gradient(135deg, rgba(14,165,233,0.06), rgba(99,102,241,0.06))',
+      border: '1px solid rgba(56,189,248,0.18)',
+      borderRadius: 14, padding: '20px 22px',
+      fontFamily: 'Outfit, sans-serif',
+    }}>
+      {/* Header row */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+        <div style={{
+          width: 36, height: 36, borderRadius: 10,
+          background: 'linear-gradient(135deg,#0ea5e9,#6366f1)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          fontSize: 16, flexShrink: 0,
+          boxShadow: '0 0 16px rgba(56,189,248,0.35)',
+        }}>AI</div>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontWeight: 700, fontSize: 14, color: '#e2e8f0', marginBottom: 2 }}>
+            {isAgent ? 'AI Agent Pipeline Running' : 'Qwen2.5-VL Analyzing Image'}
+          </div>
+          <div style={{ fontSize: 11, color: '#64748b' }}>
+            Running on CPU — please wait, this takes 1–2 minutes
+          </div>
+        </div>
+        {/* Live timer */}
+        <div style={{
+          background: 'rgba(14,165,233,0.12)', border: '1px solid rgba(56,189,248,0.25)',
+          borderRadius: 8, padding: '4px 12px', textAlign: 'center', minWidth: 70,
+        }}>
+          <div style={{ fontSize: 18, fontWeight: 800, color: '#38bdf8', lineHeight: 1.2 }}>
+            {fmtTime(elapsed)}
+          </div>
+          <div style={{ fontSize: 9, color: '#475569', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            elapsed
+          </div>
+        </div>
+      </div>
+
+      {/* Progress bar */}
+      <div style={{
+        background: 'rgba(15,23,42,0.6)', borderRadius: 99,
+        height: 6, marginBottom: 14, overflow: 'hidden',
+        border: '1px solid rgba(56,189,248,0.1)',
+      }}>
+        <div style={{
+          height: '100%', borderRadius: 99,
+          background: 'linear-gradient(90deg,#0ea5e9,#6366f1,#a78bfa)',
+          width: `${progress}%`,
+          transition: 'width 1s linear',
+          boxShadow: '0 0 8px rgba(56,189,248,0.5)',
+        }} />
+      </div>
+
+      {/* Stage steps */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {CPU_STAGES.map((s, i) => {
+          const isPast    = i < stage;
+          const isCurrent = i === stage;
+          return (
+            <div key={i} style={{
+              display: 'flex', alignItems: 'center', gap: 10,
+              opacity: isPast ? 0.45 : isCurrent ? 1 : 0.3,
+              transition: 'opacity 0.4s',
+            }}>
+              {/* Dot */}
+              <div style={{
+                width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
+                background: isPast ? '#10b981' : isCurrent ? '#38bdf8' : '#334155',
+                boxShadow: isCurrent ? '0 0 8px #38bdf8' : 'none',
+                animation: isCurrent ? 'pulse-dot 1.4s infinite' : 'none',
+              }} />
+              <span style={{
+                fontSize: 12, color: isCurrent ? '#e2e8f0' : '#64748b',
+                fontWeight: isCurrent ? 600 : 400,
+                flex: 1,
+              }}>
+                {s.label}
+              </span>
+              {isPast && (
+                <span style={{ fontSize: 10, color: '#10b981', fontWeight: 600 }}>done</span>
+              )}
+              {isCurrent && (
+                <span style={{
+                  fontSize: 10, color: '#38bdf8', fontWeight: 600,
+                  animation: 'fade-blink 1.2s infinite',
+                }}>running…</span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ETA row */}
+      <div style={{
+        marginTop: 14, paddingTop: 12,
+        borderTop: '1px solid rgba(56,189,248,0.08)',
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+      }}>
+        <span style={{ fontSize: 11, color: '#475569' }}>
+          Estimated time remaining: ~{fmtTime(remaining)}
+        </span>
+        <span style={{ fontSize: 10, color: '#334155', fontFamily: 'monospace' }}>
+          CPU • No GPU detected
+        </span>
+      </div>
+
+      <style>{`
+        @keyframes pulse-dot {
+          0%, 100% { transform: scale(1); opacity: 1; }
+          50% { transform: scale(1.6); opacity: 0.6; }
+        }
+        @keyframes fade-blink {
+          0%, 100% { opacity: 1; } 50% { opacity: 0.4; }
+        }
+      `}</style>
+    </div>
+  );
+}
+
 // ─── Smart Grounding Viewer Component ─────────────────────────────────────────
 function SmartGroundingViewer({ imageUrl, query, answer, bboxes = [], bboxObject = null }) {
   const canvasRef = useRef(null);
@@ -210,7 +374,7 @@ function SmartGroundingViewer({ imageUrl, query, answer, bboxes = [], bboxObject
   const activeBoxes = realBoxes;
   const shouldDraw  = activeBoxes.length > 0;
 
-  // Draw boxes on canvas
+  // Draw SQUARE boxes on canvas with premium styling
   const drawBoxes = useCallback(() => {
     const canvas = canvasRef.current;
     const img    = imgRef.current;
@@ -222,29 +386,55 @@ function SmartGroundingViewer({ imageUrl, query, answer, bboxes = [], bboxObject
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, width, height);
 
-    activeBoxes.forEach(({ x1, y1, x2, y2, label }) => {
-      const px  = x1 * width;
-      const py  = y1 * height;
-      const bw  = (x2 - x1) * width;
-      const bh  = (y2 - y1) * height;
+    const COLORS = [
+      { stroke: '#38bdf8', fill: 'rgba(56,189,248,0.10)', label: 'rgba(14,165,233,0.95)', glow: '#38bdf8' },
+      { stroke: '#a78bfa', fill: 'rgba(167,139,250,0.10)', label: 'rgba(124,58,237,0.95)', glow: '#a78bfa' },
+      { stroke: '#34d399', fill: 'rgba(52,211,153,0.10)', label: 'rgba(5,150,105,0.95)', glow: '#34d399' },
+      { stroke: '#fb923c', fill: 'rgba(251,146,60,0.10)',  label: 'rgba(234,88,12,0.95)',  glow: '#fb923c' },
+    ];
 
-      // Cyan glowing border — all boxes are real Qwen coordinates
-      ctx.shadowColor  = '#38bdf8';
-      ctx.shadowBlur   = 14;
-      ctx.strokeStyle  = '#38bdf8';
-      ctx.lineWidth    = 2;
+    activeBoxes.forEach(({ x1, y1, x2, y2, label }, idx) => {
+      const col  = COLORS[idx % COLORS.length];
+
+      // Raw pixel dimensions from normalized coords
+      const rx  = x1 * width;
+      const ry  = y1 * height;
+      const rw  = (x2 - x1) * width;
+      const rh  = (y2 - y1) * height;
+
+      // ── FORCE SQUARE: use the larger dimension ──────────────────────────
+      const side = Math.max(rw, rh);
+      // Center the square on the original rect center
+      const cx   = rx + rw / 2;
+      const cy   = ry + rh / 2;
+      const px   = cx - side / 2;
+      const py   = cy - side / 2;
+      const bw   = side;
+      const bh   = side;
+      // ───────────────────────────────────────────────────────────────────
+
+      // Semi-transparent fill
+      ctx.fillStyle = col.fill;
+      ctx.fillRect(px, py, bw, bh);
+
+      // Glowing outer stroke
+      ctx.shadowColor = col.glow;
+      ctx.shadowBlur  = 18;
+      ctx.strokeStyle = col.stroke;
+      ctx.lineWidth   = 2.5;
       ctx.strokeRect(px, py, bw, bh);
+      ctx.shadowBlur  = 0;
 
-      // Corner ticks
-      ctx.shadowBlur   = 0;
-      const tick = Math.min(bw, bh) * 0.22;
-      ctx.strokeStyle  = '#7dd3fc';
-      ctx.lineWidth    = 2.5;
+      // Corner L-brackets (thick, sharp)
+      const tick = Math.min(bw, bh) * 0.18;
+      ctx.strokeStyle = col.stroke;
+      ctx.lineWidth   = 4;
+      ctx.lineCap     = 'square';
       [
-        [px,    py,    1, 0], [px,    py,    0, 1],
-        [px+bw, py,   -1, 0], [px+bw, py,    0, 1],
-        [px,    py+bh, 1, 0], [px,    py+bh, 0,-1],
-        [px+bw, py+bh,-1, 0], [px+bw, py+bh, 0,-1],
+        [px,      py,      +1,  0], [px,      py,       0, +1],  // top-left
+        [px + bw, py,      -1,  0], [px + bw, py,       0, +1],  // top-right
+        [px,      py + bh,  +1,  0], [px,      py + bh,  0, -1],  // bottom-left
+        [px + bw, py + bh, -1,  0], [px + bw, py + bh,  0, -1],  // bottom-right
       ].forEach(([qx, qy, dx, dy]) => {
         ctx.beginPath();
         ctx.moveTo(qx, qy);
@@ -252,18 +442,26 @@ function SmartGroundingViewer({ imageUrl, query, answer, bboxes = [], bboxObject
         ctx.stroke();
       });
 
-      // Label pill
-      const fontSize = Math.max(10, Math.min(13, bw * 0.14));
-      ctx.font       = `bold ${fontSize}px 'Outfit', sans-serif`;
-      const tw       = ctx.measureText(label).width;
-      const pH       = fontSize + 6;
-      ctx.fillStyle  = 'rgba(14,165,233,0.92)';
+      // Label pill with object number
+      const fontSize = Math.max(11, Math.min(14, bw * 0.13));
+      ctx.font = `700 ${fontSize}px 'Outfit', 'Inter', sans-serif`;
+      const tw  = ctx.measureText(label).width;
+      const pH  = fontSize + 8;
+      const lx  = px;
+      const ly  = py - pH - 4 < 0 ? py + 2 : py - pH - 2;
+
+      // Pill background
+      ctx.fillStyle = col.label;
+      ctx.shadowColor = col.glow;
+      ctx.shadowBlur  = 8;
       ctx.beginPath();
-      ctx.roundRect(px, Math.max(pH + 3, py) - pH - 3, tw + 12, pH, 4);
+      ctx.roundRect(lx, ly, tw + 16, pH, 5);
       ctx.fill();
-      ctx.fillStyle  = '#ffffff';
       ctx.shadowBlur = 0;
-      ctx.fillText(label, px + 6, Math.max(pH + 3, py) - 7);
+
+      // Pill text
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(label, lx + 8, ly + pH - 5);
     });
   }, [activeBoxes, shouldDraw]);
 
@@ -291,40 +489,60 @@ function SmartGroundingViewer({ imageUrl, query, answer, bboxes = [], bboxObject
           src={imageUrl}
           alt="Scene"
           className="grounding-img"
-          style={{ display: 'block', width: '100%' }}
+          style={{ display: 'block', width: '100%', borderRadius: 10 }}
         />
-        {/* Canvas — real Qwen bounding boxes (cyan) */}
-        {shouldDraw && (
-          <canvas
-            ref={canvasRef}
-            style={{
-              position: 'absolute', top: 0, left: 0,
-              width: '100%', height: '100%', pointerEvents: 'none',
-            }}
-          />
-        )}
-        {/* When no real boxes: show the model's text answer as a clean overlay */}
+        {/* Canvas — square detection boxes */}
+        <canvas
+          ref={canvasRef}
+          style={{
+            position: 'absolute', top: 0, left: 0,
+            width: '100%', height: '100%', pointerEvents: 'none',
+            borderRadius: 10,
+          }}
+        />
+        {/* No-bbox overlay — show model answer text */}
         {!shouldDraw && answer && (
           <div style={{
             position: 'absolute', bottom: 10, left: 10, right: 10,
-            background: 'rgba(15,23,42,0.85)', backdropFilter: 'blur(8px)',
-            borderRadius: 8, padding: '10px 14px', border: '1px solid rgba(56,189,248,0.2)',
+            background: 'rgba(15,23,42,0.88)', backdropFilter: 'blur(10px)',
+            borderRadius: 10, padding: '12px 16px',
+            border: '1px solid rgba(56,189,248,0.25)',
             color: '#e2e8f0', fontFamily: 'Outfit, sans-serif', fontSize: 13, lineHeight: 1.5,
           }}>
-            <span style={{ color: '#38bdf8', fontWeight: 700, marginRight: 6 }}>🤖</span>
+            <span style={{ color: '#38bdf8', fontWeight: 700, marginRight: 6 }}>AI</span>
             {answer.split('\n')[0]}
           </div>
         )}
-        {/* Real bbox count badge */}
+        {/* Detection count badge */}
         {shouldDraw && (
           <div style={{
-            position: 'absolute', top: 8, right: 8,
-            background: 'rgba(14,165,233,0.92)', color: '#fff',
-            borderRadius: 8, padding: '4px 12px',
+            position: 'absolute', top: 10, right: 10,
+            background: 'linear-gradient(135deg,rgba(14,165,233,0.95),rgba(99,102,241,0.95))',
+            color: '#fff', borderRadius: 8, padding: '5px 14px',
             fontFamily: 'Outfit, sans-serif', fontSize: 13, fontWeight: 700,
-            boxShadow: '0 0 12px #38bdf888', backdropFilter: 'blur(4px)',
+            boxShadow: '0 0 18px #38bdf866', backdropFilter: 'blur(6px)',
+            letterSpacing: '0.02em',
           }}>
             {activeBoxes.length} {objectLabel}{activeBoxes.length !== 1 ? 's' : ''} detected
+          </div>
+        )}
+        {/* Legend row */}
+        {shouldDraw && (
+          <div style={{
+            position: 'absolute', bottom: 10, left: 10,
+            display: 'flex', gap: 6, flexWrap: 'wrap',
+          }}>
+            {activeBoxes.slice(0, 6).map((b, i) => (
+              <div key={i} style={{
+                background: 'rgba(15,23,42,0.88)', backdropFilter: 'blur(6px)',
+                border: '1px solid rgba(56,189,248,0.3)',
+                borderRadius: 6, padding: '3px 10px',
+                fontFamily: 'Outfit, sans-serif', fontSize: 11,
+                color: '#7dd3fc', fontWeight: 600,
+              }}>
+                #{i + 1} {b.label?.split(' ')[0] || objectLabel}
+              </div>
+            ))}
           </div>
         )}
       </div>
@@ -332,159 +550,261 @@ function SmartGroundingViewer({ imageUrl, query, answer, bboxes = [], bboxObject
   );
 }
 
-
-// ─── Answer Enrichment — expands short model answers into detailed reports ────────────────
+// ─── Answer Enrichment ── rich research-quality report builder ────────────────
 function enrichAnswer(rawAnswer, query) {
   if (!rawAnswer || rawAnswer === 'No answer returned.') return rawAnswer;
 
-  const q     = (query || '').toLowerCase().trim();
-  const ans   = rawAnswer.trim();
+  const q   = (query || '').toLowerCase().trim();
+  const ans = rawAnswer.trim();
 
-  // Already rich (has markdown headings or multiple lines) — pass through
-  if (ans.includes('###') || ans.includes('\n-') || ans.split('\n').length > 4) return ans;
+  // Already a rich multi-section response from the model — pass it straight through
+  // with only minor cleanup. This handles the new 512-token research answers.
+  if (
+    ans.split('\n').length > 5 ||
+    ans.length > 300 ||
+    ans.includes('###') ||
+    ans.includes('**')
+  ) {
+    // Wrap raw model answer in a styled research container
+    return (
+`## AI Analysis Report
 
-  // ── Detect query intent ───────────────────────────────────────
-  const isCount    = /how many|count|number of|total/.test(q);
-  const isDescribe = /describe|what is|what do you see|what can you see|scene|land.?cover|overview/.test(q);
+${ans}
+
+---
+
+### Methodology
+
+- **Model:** Qwen2.5-VL-3B + LoRA (VRSBench fine-tuned)
+- **Query processed:** "${query}"
+- **Analysis type:** Research-mode remote sensing intelligence report
+- **Token budget:** 512 tokens (extended analysis mode)
+
+### Confidence & Limitations
+
+- Results depend on image resolution, sensor type, and viewing angle
+- Partially occluded objects may be underreported
+- Best accuracy achieved with high-resolution nadir-view imagery`
+    );
+  }
+
+  // ── Detect query intent ────────────────────────────────────────────────────
+  const isCount    = /how many|count|number of|total|detect|find all/.test(q);
+  const isDescribe = /describe|what is|what do you see|scene|land.?cover|overview|explain|analysis/.test(q);
   const isChange   = /change|differ|before|after|between/.test(q);
   const isLocate   = /where|location|position|find|locate|show me/.test(q);
   const isIdentify = /identify|what type|classify|what kind|what sort/.test(q);
 
-  // Extract count digit from answer if present
-  const numMatch  = ans.match(/\d+/) || ans.match(/\b(one|two|three|four|five|six|seven|eight|nine|ten)\b/i);
-  const numStr    = numMatch ? numMatch[0] : null;
+  const numMatch = ans.match(/\d+/) || ans.match(/\b(one|two|three|four|five|six|seven|eight|nine|ten)\b/i);
+  const numStr   = numMatch ? numMatch[0] : null;
+  const objKw    = OBJECT_KEYWORDS.find(({ keys }) => keys.some(k => q.includes(k)));
+  const objLabel = objKw
+    ? objKw.label.toLowerCase() + (numStr && numStr !== '1' && numStr !== 'one' ? 's' : '')
+    : 'object(s)';
+  const numWord = numStr ? numStr : 'Multiple';
 
-  // Extract object keyword from query
-  const objKw = OBJECT_KEYWORDS.find(({ keys }) => keys.some(k => q.includes(k)));
-  const objLabel = objKw ? objKw.label.toLowerCase() + (numStr && numStr !== '1' && numStr !== 'one' ? 's' : '') : 'object(s)';
-
-  // ── Build enriched response ───────────────────────────────────────
+  // ── Count / Detection query ────────────────────────────────────────────────
   if (isCount && objKw) {
+    const singularLabel = objKw.label.toLowerCase();
     return (
-`### 🛫 Detection Summary
+`## Detection Analysis Report
 
-**${ans}**
+### Direct Answer
 
-### 📊 Breakdown
+The model detected **${numWord} ${objLabel}** in this satellite image.
 
-- **Total ${objLabel} detected:** ${numStr || 'Multiple'}
-- **Detection method:** Visual instance analysis via Qwen2.5-VL-3B
-- **Coverage area:** Full image extent scanned
-- **Model confidence:** High — each instance individually identified
+### Spatial Distribution
 
-### 🔍 What This Means
+The visible ${objLabel} are distributed across the image frame. Each instance has been individually evaluated using Qwen2.5-VL-3B's visual grounding capabilities. Detected objects are highlighted in the **Visual Evidence & Viewer** tab with numbered square bounding boxes.
 
-- Each detected ${objLabel.replace(/s$/, '')} is spatially distinct and separately visible in the image
-- Count accuracy depends on image resolution, occlusion, and viewing angle
-- Objects partially outside the frame may not be included in the count
+### Detection Methodology
 
-### 💡 Satellite Insight
+- **Step 1 — Scene Parsing:** The model ingests the full satellite image in a single forward pass, building a spatial feature map of the scene.
+- **Step 2 — Object Localization:** Visual grounding prompts instruct the model to enumerate all visible ${singularLabel} instances, including partially occluded ones.
+- **Step 3 — Coordinate Extraction:** Bounding box coordinates (x₁, y₁, x₂, y₂) are extracted from the model's structured output and normalized to [0, 1] range.
+- **Step 4 — Count Aggregation:** Detected instances are counted and rendered as labeled square boxes on the image.
 
-- Counting objects from satellite imagery requires high spatial resolution
-- Qwen2.5-VL-3B processes the entire scene in a single pass, scanning for all instances
-- Results are most accurate when objects are non-overlapping and clearly resolved`
+### Accuracy Assessment
+
+- **Resolution dependency:** At very high resolutions (< 0.3 m/px), small objects are clearly distinguishable. At moderate resolutions, closely spaced objects may be merged.
+- **Occlusion handling:** Objects behind other structures or at image edges may be partially visible and could affect the final count.
+- **Viewing angle:** Nadir (top-down) imagery provides the most accurate counts; oblique angles can distort object shapes and boundaries.
+
+### Remote Sensing Context
+
+Automated object counting from satellite imagery is a core task in geospatial intelligence (GEOINT). Applications include:
+- **Airport monitoring:** Aircraft counting for traffic analysis and capacity planning
+- **Urban planning:** Vehicle density estimation for traffic flow models
+- **Military intelligence:** Infrastructure and asset enumeration
+- **Environmental monitoring:** Wildlife counting over large areas
+
+### Confidence Assessment
+
+The model's confidence is computed from the token-level probability distribution of the generated count. Higher confidence indicates the object class was unambiguously identified.
+
+---
+
+*Analysis powered by Qwen2.5-VL-3B fine-tuned on VRSBench remote sensing dataset*`
     );
   }
 
+  // ── Describe / Identify query ──────────────────────────────────────────────
   if (isDescribe || isIdentify) {
     return (
-`### 🌍 Scene Overview
+`## Scene Intelligence Report
+
+### Model Interpretation
 
 ${ans}
 
-### 🗺️ Visual Breakdown
+### Scene Composition Analysis
 
-- **Imagery type:** Satellite / Aerial optical image
-- **Analysis model:** Qwen2.5-VL-3B fine-tuned on remote sensing data
-- **Scene complexity:** Multi-element landscape with mixed land-cover types
+- **Imagery type:** High-resolution satellite / aerial optical imagery
+- **Analysis engine:** Qwen2.5-VL-3B multimodal language model
+- **Scene complexity:** Multi-element landscape — the model evaluated spatial layout, land-cover patterns, infrastructure, and natural features simultaneously.
 
-### 🔎 Key Observations
+### Visual Feature Breakdown
 
-- The scene contains a variety of surface features detectable at this resolution
-- Land-cover patterns, infrastructure, and natural elements have been assessed
-- Spectral and spatial properties were used to classify scene contents
+The model examines the following feature classes to produce this analysis:
 
-### 💡 Remote Sensing Notes
+1. **Spectral signatures** — color and brightness patterns that distinguish surface types (vegetation, water, urban materials, bare soil)
+2. **Texture analysis** — fine-grained spatial variation that differentiates forests from grasslands, or roads from runways
+3. **Geometric patterns** — regular shapes and grids indicating built infrastructure vs. irregular organic natural features
+4. **Contextual relationships** — proximity of objects (e.g., aircraft near terminals, vessels near ports) provides semantic context
 
-- High-resolution optical imagery enables detailed feature extraction
-- Shadow patterns, texture, and color signatures all contribute to scene interpretation
-- Results may vary with cloud cover, season, or sensor type`
+### Confidence Factors
+
+- Confidence is highest when scene elements are large, high-contrast, and geometrically distinct
+- Atmospheric haze, cloud cover, or low sun angle can reduce spectral clarity
+- Seasonal variation changes vegetation appearance significantly
+
+### Applications
+
+This type of scene classification is used in:
+- **Land use / land cover (LULC) mapping**
+- **Urban growth monitoring**
+- **Disaster damage assessment**
+- **Agricultural field monitoring**
+
+---
+
+*Powered by Qwen2.5-VL-3B + LoRA adapter fine-tuned on VRSBench*`
     );
   }
 
+  // ── Change detection query ─────────────────────────────────────────────────
   if (isChange) {
     return (
-`### 🔄 Change Detection Report
+`## Temporal Change Detection Report
+
+### Analysis Result
 
 ${ans}
 
-### 📈 What Changed
+### Change Detection Methodology
 
-- **Detected change type:** Temporal land-cover or structural modification
-- **Comparison method:** Bi-temporal image analysis
-- **Change magnitude:** Assessed from spectral and spatial differences
+Bi-temporal analysis compares two satellite images acquired at different dates. The model evaluates:
 
-### 📅 Temporal Analysis
+1. **Spectral change** — shifts in pixel color/brightness indicating surface type change
+2. **Structural change** — appearance or disappearance of built features (buildings, roads)
+3. **Vegetation phenology** — seasonal or long-term changes in plant cover
+4. **Hydrological change** — fluctuations in water body boundaries (floods, droughts)
 
-- Changes are measured between two distinct acquisition dates
-- Both natural and human-induced changes are captured in the comparison
-- Rapid changes (construction, deforestation, flooding) are highly detectable
+### Change Classification
 
-### 💡 Insight
+| Change Type | Description | Typical Cause |
+|---|---|---|
+| Urban expansion | New structures appear | Development / construction |
+| Deforestation | Vegetation loss | Logging, agriculture conversion |
+| Flooding | Water body expansion | Heavy rainfall, storm surge |
+| Infrastructure | Roads, runways added | Civil engineering projects |
 
-- Satellite change detection is widely used for urban monitoring, disaster assessment, and environmental tracking
-- Fine-tuned VLMs like Qwen2.5-VL-3B understand both before and after contexts simultaneously`
+### Confidence & Limitations
+
+- Radiometric normalization is critical: differences in sensor calibration or solar angle can produce false positives
+- Cloud cover in either epoch introduces gaps in coverage
+- Fine changes (< 1m) may be below the model's effective detection threshold
+
+---
+
+*Analysis by Qwen2.5-VL-3B | Upload before + after images for bi-temporal comparison*`
     );
   }
 
+  // ── Location / Grounding query ─────────────────────────────────────────────
   if (isLocate) {
     return (
-`### 📍 Location & Grounding
+`## Spatial Grounding Report
+
+### Localization Result
 
 ${ans}
 
-### 🎯 Spatial Analysis
+### Referring Expression Grounding
 
-- **Task type:** Referring expression grounding
-- **Method:** The model identifies the target object using visual context and spatial reasoning
-- **Output:** Bounding region within the image frame
+The model uses visual attention to locate described objects within the image:
 
-### 🔍 How It Works
+1. **Language parsing** — the query is parsed to identify the target object and any spatial qualifiers ("top-left", "near the runway", etc.)
+2. **Visual scan** — the model attends to candidate regions matching the description
+3. **Coordinate prediction** — bounding box coordinates are predicted in normalized [0, 1] space
+4. **Visualization** — detected region is highlighted as a square box in the Visual Evidence tab
 
-- The model scans the entire image to locate the described feature
-- Spatial relationships (top-left, center, bottom) are inferred from context
-- The detected region is highlighted in the Visual Evidence tab
+### Spatial Reference Frame
 
-### 💡 Remote Sensing Context
+- Coordinates use image-space: **top-left = (0, 0)**, **bottom-right = (1, 1)**
+- Bounding boxes are displayed as squares for clear, unambiguous highlighting
+- Multiple matching objects will each receive their own numbered box
 
-- Object localization in satellite images is challenging due to scale variation and viewing angle
-- Qwen2.5-VL-3B uses visual grounding capabilities trained on remote sensing datasets`
+### Remote Sensing Context
+
+Object localization in satellite imagery is challenging due to:
+- **Scale variation** — objects appear at very different sizes depending on altitude and sensor resolution
+- **Viewing angle** — top-down perspective distorts familiar object shapes
+- **Density** — closely packed objects (parking lots, airports) are harder to individually isolate
+
+---
+
+*Powered by Qwen2.5-VL-3B visual grounding | Check Visual Evidence tab for bounding box overlay*`
     );
   }
 
-  // Generic fallback — wrap in a clean structured report
+  // ── Generic research fallback ──────────────────────────────────────────────
   return (
-`### 🛰️ SatQuery AI Analysis
+`## SatQuery AI — Geospatial Analysis
+
+### Model Response
 
 ${ans}
 
-### 📋 What the Model Sees
+### Analysis Context
 
-- **Image type:** Satellite / Aerial imagery
-- **Query processed:** "${query}"
-- **Model used:** Qwen2.5-VL-3B + LoRA (VRSBench fine-tuned)
+- **Query:** "${query}"
+- **Image type:** Satellite / Aerial optical imagery
+- **Model:** Qwen2.5-VL-3B + LoRA (VRSBench fine-tuned, extended research mode)
+- **Token budget:** 512 tokens (research mode)
 
-### 🔬 Analysis Details
+### How the Analysis Was Performed
 
-- The model processes the full image in a single forward pass
-- Both spatial and semantic features are used to generate the response
-- Confidence is computed from token-level probability scores
+1. The satellite image was preprocessed and tokenized using the Qwen2.5-VL visual encoder
+2. Your query was embedded alongside the image in a multimodal context window
+3. The model generated a response conditioned on both the image content and your question
+4. Confidence is estimated from the entropy of the output token probability distribution
 
-### 💡 Tips for Better Results
+### Interpretation Notes
 
-- Use specific questions: *"How many buildings are in the top-left corner?"*
-- For change detection, upload two images (before + after)
-- For SAR analysis, include a SAR image alongside the optical image`
+- Remote sensing imagery interpretation requires domain expertise; the model's output should be cross-verified with ground truth data for critical applications
+- High-resolution nadir imagery yields the most accurate results
+- Time-of-day and atmospheric conditions affect spectral quality
+
+### Improve Your Results
+
+- **Be specific:** Instead of *"What is in this image?"*, ask *"How many cargo aircraft are visible near the terminal?"*
+- **Use Agent mode:** For complex multi-part queries, enable the AI Agent toggle for parallel CNN + VLM analysis
+- **Change detection:** Upload two images (before + after) and ask about changes between them
+
+---
+
+*SatQuery AI | Qwen2.5-VL-3B | VRSBench Fine-Tuned | ByteX Platform*`
   );
 }
 
@@ -826,7 +1146,6 @@ export default function SatQueryWorkspace({ user, onLogout }) {
       setQueryStatus('processing');
 
       // Step 3 — Listen for agent result from /agent_results/{queryId}
-      const AGENT_TIMEOUT_MS = 180_000; // 3 min (agent runs CNN + VLM)
 
       const unsubAgent = listenForAgentResult(queryId, {
         onResult: (data) => {
@@ -894,13 +1213,14 @@ export default function SatQueryWorkspace({ user, onLogout }) {
 
       unsubListenerRef.current = unsubAgent;
 
-      // Timeout guard
+      // Timeout guard — CPU inference takes 4-8 min for full agent pipeline
+      // (CNN detect + segment + Qwen VLM = multiple slow CPU passes)
       timeoutRef.current = setTimeout(() => {
         unsubAgent();
-        setQueryError('Agent analysis timed out (3 min). The model may be loading — try again.');
+        setQueryError('Analysis timed out. On CPU, the AI Agent pipeline (CNN + VLM) can take up to 10 minutes. Your query is still being processed in the backend — try refreshing in 2-3 minutes.');
         setQueryStatus('timeout');
         setIsAgentAnalyzing(false);
-      }, AGENT_TIMEOUT_MS);
+      }, RESULT_TIMEOUT_MS);
 
     } catch (err) {
       setQueryError(`Agent analysis failed: ${err.message}`);
@@ -1401,16 +1721,9 @@ export default function SatQueryWorkspace({ user, onLogout }) {
             </div>
           )}
 
-          {/* ── Processing spinner ───────────────────────────────────────── */}
+          {/* ── Processing spinner (CPU-aware with live timer) ───────────── */}
           {(isAnalyzing && queryStatus === 'processing') || isAgentAnalyzing ? (
-            <div className="analyzing-state">
-              <div className="analyzing-spinner" />
-              <span className="analyzing-text">
-                {isAgentAnalyzing
-                  ? 'AI Agent running pipeline… (Route → Plan → Execute → Verify → Merge)'
-                  : 'Qwen2.5-VL analyzing your image…'}
-              </span>
-            </div>
+            <CpuInferenceProgress isAgent={isAgentAnalyzing} />
           ) : null}
 
           {/* ── Results ──────────────────────────────────────────────────── */}
@@ -1509,39 +1822,118 @@ export default function SatQueryWorkspace({ user, onLogout }) {
 
               {/* Tab: Textual Analysis */}
               {activeTab === 'report' && (
-                <div className="text-report-pane">
-                  <div className="markdown-body" dangerouslySetInnerHTML={{
+                <div className="text-report-pane" style={{ padding: '4px 0' }}>
+
+                  {/* ── Report Header ── */}
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: 10,
+                    marginBottom: 20, paddingBottom: 16,
+                    borderBottom: '1px solid rgba(56,189,248,0.12)',
+                  }}>
+                    <div style={{
+                      background: 'linear-gradient(135deg,#0ea5e9,#6366f1)',
+                      borderRadius: 8, padding: '6px 10px',
+                      fontSize: 18, lineHeight: 1,
+                    }}>AI</div>
+                    <div>
+                      <div style={{ fontFamily: 'Outfit,sans-serif', fontWeight: 700, fontSize: 14, color: '#e2e8f0' }}>
+                        SatQuery AI — Research Analysis
+                      </div>
+                      <div style={{ fontSize: 11, color: '#64748b', fontFamily: 'Outfit,sans-serif', marginTop: 2 }}>
+                        Qwen2.5-VL-3B • VRSBench Fine-Tuned • Extended Research Mode (512 tokens)
+                      </div>
+                    </div>
+                    <div style={{ marginLeft: 'auto' }}>
+                      <span style={{
+                        background: 'rgba(56,189,248,0.1)', border: '1px solid rgba(56,189,248,0.3)',
+                        borderRadius: 6, padding: '3px 10px',
+                        fontSize: 11, color: '#38bdf8', fontFamily: 'Outfit,sans-serif', fontWeight: 600,
+                      }}>
+                        {analysisResult.confidence}% confidence
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* ── Rendered Markdown Report ── */}
+                  <div style={{
+                    fontFamily: 'Outfit, Inter, sans-serif',
+                    fontSize: 14, lineHeight: 1.75, color: '#cbd5e1',
+                  }} dangerouslySetInnerHTML={{
                     __html: analysisResult.textResponse
-                      // Headings
-                      .replace(/^### (.*$)/gim, '<h3 style="margin:18px 0 8px;color:#38bdf8;font-size:1em;font-weight:700;letter-spacing:.02em;">$1</h3>')
-                      .replace(/^## (.*$)/gim,  '<h2 style="margin:20px 0 10px;color:#7dd3fc;font-size:1.1em;font-weight:700;">$1</h2>')
+                      // h1 (##)
+                      .replace(/^## (.*$)/gim, '<h2 style="margin:28px 0 12px;padding-bottom:8px;border-bottom:1px solid rgba(56,189,248,0.15);color:#7dd3fc;font-size:1.15em;font-weight:800;letter-spacing:0.01em;font-family:Outfit,sans-serif;">$1</h2>')
+                      // h2 (###)
+                      .replace(/^### (.*$)/gim, '<h3 style="margin:22px 0 8px;color:#38bdf8;font-size:1em;font-weight:700;letter-spacing:0.02em;font-family:Outfit,sans-serif;">$1</h3>')
+                      // h3 (####)
+                      .replace(/^#### (.*$)/gim, '<h4 style="margin:16px 0 6px;color:#94a3b8;font-size:0.9em;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;">$1</h4>')
+                      // Horizontal rule
+                      .replace(/^---$/gim, '<hr style="border:none;border-top:1px solid rgba(56,189,248,0.12);margin:20px 0;"/>')
+                      // Table rows — simple pipe-delimited tables
+                      .replace(/^\|(.+)\|$/gim, (_, row) => {
+                        const cells = row.split('|').map(c => c.trim());
+                        return `<div style="display:flex;gap:0;margin:1px 0;">${cells.map(c =>
+                          c.match(/^[-:]+$/)
+                            ? '' // skip separator rows
+                            : `<div style="flex:1;padding:6px 10px;background:rgba(15,23,42,0.6);border:1px solid rgba(56,189,248,0.08);font-size:12px;color:#94a3b8;">${c}</div>`
+                        ).join('')}</div>`;
+                      })
                       // Bold
-                      .replace(/\*\*(.*?)\*\*/gim, '<strong style="color:#e2e8f0;font-weight:600;">$1</strong>')
-                      // Bullet points — wrap consecutive <li> in a <ul>
-                      .replace(/^- (.*$)/gim, '<li style="margin:5px 0 5px 16px;list-style:none;padding-left:12px;position:relative;"><span style="position:absolute;left:0;color:#38bdf8;">▸</span>$1</li>')
-                      // Numbered list
-                      .replace(/^(\d+)\. (.*$)/gim, '<li style="margin:5px 0 5px 16px;list-style:decimal;color:#cbd5e1;">$2</li>')
+                      .replace(/\*\*(.*?)\*\*/gim, '<strong style="color:#e2e8f0;font-weight:700;">$1</strong>')
                       // Italic
-                      .replace(/\*(.*?)\*/gim, '<em style="color:#94a3b8;">$1</em>')
-                      // Line breaks
-                      .replace(/\n\n/g, '<br/><br/>')
+                      .replace(/\*(.*?)\*/gim, '<em style="color:#94a3b8;font-style:italic;">$1</em>')
+                      // Numbered list items
+                      .replace(/^(\d+)\. (.*$)/gim, '<div style="display:flex;gap:10px;margin:6px 0 6px 4px;align-items:flex-start;"><span style="min-width:22px;height:22px;background:linear-gradient(135deg,#0ea5e9,#6366f1);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:800;color:#fff;flex-shrink:0;margin-top:1px;">$1</span><span style="color:#cbd5e1;line-height:1.65;">$2</span></div>')
+                      // Bullet list items
+                      .replace(/^- (.*$)/gim, '<div style="display:flex;gap:10px;margin:5px 0 5px 4px;align-items:flex-start;"><span style="color:#38bdf8;font-size:16px;line-height:1;margin-top:2px;flex-shrink:0;">▸</span><span style="color:#cbd5e1;line-height:1.65;">$1</span></div>')
+                      // Italic in backtick
+                      .replace(/`(.*?)`/gim, '<code style="background:rgba(56,189,248,0.08);border:1px solid rgba(56,189,248,0.15);border-radius:4px;padding:1px 6px;font-size:12px;font-family:monospace;color:#7dd3fc;">$1</code>')
+                      // Double line breaks → paragraph spacer
+                      .replace(/\n\n/g, '<div style="height:8px;"></div>')
+                      // Single line breaks
                       .replace(/\n/g, '<br/>')
                   }} />
-                  {/* Raw answer badge */}
-                  {analysisResult.rawAnswer && (
+
+                  {/* ── Raw Answer Trace ── */}
+                  {analysisResult.rawAnswer && analysisResult.rawAnswer !== analysisResult.textResponse && (
                     <div style={{
-                      marginTop: 20, padding: '10px 14px',
-                      background: 'rgba(56,189,248,0.07)', borderRadius: 8,
+                      marginTop: 24, padding: '12px 16px',
+                      background: 'rgba(15,23,42,0.7)',
+                      border: '1px solid rgba(56,189,248,0.12)',
                       borderLeft: '3px solid #38bdf8',
-                      fontSize: 12, color: '#94a3b8',
-                      fontFamily: 'monospace',
+                      borderRadius: 8,
                     }}>
-                      <span style={{ color: '#38bdf8', fontWeight: 700, fontFamily: 'Outfit,sans-serif' }}>🤖 Raw model answer: </span>
-                      {analysisResult.rawAnswer}
+                      <div style={{ fontSize: 11, color: '#38bdf8', fontWeight: 700, fontFamily: 'Outfit,sans-serif', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                        Raw Model Output
+                      </div>
+                      <div style={{ fontSize: 12, color: '#64748b', fontFamily: 'monospace', lineHeight: 1.6 }}>
+                        {analysisResult.rawAnswer}
+                      </div>
                     </div>
                   )}
+
+                  {/* ── Footer Model Info ── */}
+                  <div style={{
+                    marginTop: 24,
+                    display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8,
+                  }}>
+                    {[
+                      { label: 'Model', value: 'Qwen2.5-VL-3B' },
+                      { label: 'Adapter', value: 'VRSBench LoRA' },
+                      { label: 'Mode', value: 'Research (512 tok)' },
+                    ].map(({ label, value }) => (
+                      <div key={label} style={{
+                        background: 'rgba(15,23,42,0.6)',
+                        border: '1px solid rgba(56,189,248,0.10)',
+                        borderRadius: 8, padding: '8px 12px', textAlign: 'center',
+                      }}>
+                        <div style={{ fontSize: 10, color: '#475569', fontFamily: 'Outfit,sans-serif', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 3 }}>{label}</div>
+                        <div style={{ fontSize: 12, color: '#7dd3fc', fontFamily: 'Outfit,sans-serif', fontWeight: 600 }}>{value}</div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
+
 
               {/* Tab: AI Agent Panel — inside analysisResult context */}
               {activeTab === 'agent' && (

@@ -199,12 +199,42 @@ class SatQueryModel:
     def answer_vqa(self, image: Image.Image, question: str) -> dict:
         if self._stub_mode:
             return self._stub_response("vqa", image, question)
-        answer, confidence = self._generate(image, question, "vqa")
+
+        on_gpu = self._device is not None and "cuda" in str(self._device)
+
+        if on_gpu:
+            # ── GPU: full research-quality prompt, 512 tokens (≈ 8-30 s) ──
+            prompt = (
+                f"You are SatQuery AI, an expert remote sensing analyst. "
+                f"A user has asked the following question about this satellite/aerial image:\n"
+                f"QUESTION: {question}\n\n"
+                f"Provide a thorough, research-quality analysis. Your response MUST include:\n"
+                f"1. A direct, precise answer to the question\n"
+                f"2. Detailed observations about what you see in the image related to the question\n"
+                f"3. Spatial context: describe locations (top-left, center, etc.) and relationships\n"
+                f"4. Any relevant characteristics: size, shape, color, density, arrangement\n"
+                f"5. Confidence assessment and any limitations or caveats\n"
+                f"6. Remote sensing insights relevant to the scene\n\n"
+                f"Write in clear, professional language as if writing a geospatial intelligence report. "
+                f"Be specific and detailed — minimum 150 words."
+            )
+            max_tok = 512
+        else:
+            # ── CPU: concise prompt, 128 tokens (≈ 30-90 s) ──
+            prompt = (
+                f"You are a satellite image analyst. "
+                f"Answer this question about the image: {question}\n"
+                f"Give a clear, direct answer in 2-4 sentences. "
+                f"Include the count/number if asked, describe what you see, and note the location."
+            )
+            max_tok = 128
+
+        answer, confidence = self._generate(image, prompt, "vqa", max_new_tokens=max_tok)
         self._stats["queries"] += 1
         return {
-            "answer":         answer,
-            "confidence":     confidence,
-            "reasoning_trace": f"VQA on {image.size[0]}x{image.size[1]} image. Q: '{question}'",
+            "answer":          answer,
+            "confidence":      confidence,
+            "reasoning_trace": f"{'Research' if on_gpu else 'CPU'}-mode VQA on {image.size[0]}x{image.size[1]} image. Q: '{question}'",
         }
 
     def detect_objects(
@@ -218,7 +248,10 @@ class SatQueryModel:
             return {"answer": "[STUB] Detection skipped.", "confidence": 0.0,
                     "bboxes": [], "object": object_label}
 
-        # Step 1 — Ask Qwen for bounding boxes in a simple parseable format
+        # Step 1 — Ask Qwen for bounding boxes
+        on_gpu = self._device is not None and "cuda" in str(self._device)
+        bbox_max_tokens = 96 if on_gpu else 48   # fewer tokens on CPU = faster
+
         prompt = (
             f"Task: Detect ALL {object_label}s in this satellite/aerial image. "
             f"Scan the ENTIRE image carefully — do NOT stop after the first one. "
@@ -232,7 +265,7 @@ class SatQueryModel:
             f"BBOX: [700, 150, 850, 280]\n"
             f"Now detect all {object_label}s and list every BBOX:"
         )
-        raw_output, confidence = self._generate(image, prompt, "refer", max_new_tokens=96)
+        raw_output, confidence = self._generate(image, prompt, "refer", max_new_tokens=bbox_max_tokens)
         bboxes = self._parse_plain_bboxes(raw_output)
 
         # Also try Qwen native grounding format if plain text parsing failed
@@ -361,14 +394,18 @@ class SatQueryModel:
         ).to(self._device)
 
         with torch.no_grad():
-            outputs = self._model.generate(
-                **inputs,
+            gen_kwargs = dict(
                 max_new_tokens=max_tokens,
-                temperature=TEMPERATURE,
                 do_sample=DO_SAMPLE,
                 return_dict_in_generate=True,
                 output_scores=True,
+                repetition_penalty=1.05,   # prevent looping in long research answers
             )
+            # temperature is only valid when sampling; greedy decoding ignores it
+            if DO_SAMPLE:
+                gen_kwargs["temperature"] = TEMPERATURE
+
+            outputs = self._model.generate(**inputs, **gen_kwargs)
 
         generated_ids = outputs.sequences[:, inputs["input_ids"].shape[1]:]
         answer = self._processor.batch_decode(

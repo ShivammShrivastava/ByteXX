@@ -170,17 +170,38 @@ class FirebaseListener:
 
     def _handle_query(self, query_id: str, query_data: dict):
         """Dispatch to the correct pipeline based on task type."""
+        import threading as _th
         task = query_data.get("task", "vqa")
-        print(f"  📥 Query {query_id} | task={task} | '{str(query_data.get('question',''))[:50]}'")
+        question = str(query_data.get('question', ''))[:50]
+        print(f"  [IN]  Query {query_id} | task={task} | '{question}'")
+        t_dispatch = time.time()
 
         # Mark as processing
         get_db().child(DB_QUERIES_PATH).child(query_id).update({"status": "processing"})
 
         try:
             image = self._load_image(query_data)
+            print(f"  [OK]  Image loaded | {image.size[0]}x{image.size[1]} | {time.time()-t_dispatch:.1f}s")
         except Exception as e:
             self._write_error(query_id, task, f"Image load failed: {e}")
             return
+
+        # Heartbeat: keep writing to RTDB so frontend knows backend is alive
+        _stop_hb = _th.Event()
+        def _heartbeat():
+            n = 0
+            while not _stop_hb.wait(30):
+                n += 1
+                elapsed = int(time.time() - t_dispatch)
+                try:
+                    get_db().child(DB_QUERIES_PATH).child(query_id).update(
+                        {"heartbeat": elapsed, "status": "processing"}
+                    )
+                    print(f"  [HB]  {query_id} still running ({elapsed}s elapsed)")
+                except Exception:
+                    pass
+        _hb_thread = _th.Thread(target=_heartbeat, daemon=True)
+        _hb_thread.start()
 
         try:
             if task == "agent":
@@ -189,8 +210,12 @@ class FirebaseListener:
                 self._handle_cnn(query_id, query_data, image, task)
             else:
                 self._handle_vlm(query_id, query_data, image, task)
+            print(f"  [OK]  Query {query_id} done in {time.time()-t_dispatch:.1f}s")
         except Exception as e:
+            print(f"  [ERR] Query {query_id} failed after {time.time()-t_dispatch:.1f}s: {e}")
             self._write_error(query_id, task, str(e))
+        finally:
+            _stop_hb.set()
 
     # ─── VLM pipeline ─────────────────────────────────────────────────────────
 
@@ -199,7 +224,17 @@ class FirebaseListener:
         question = query_data.get("question", "")
 
         if not self.model_manager.is_loaded:
-            raise RuntimeError("Qwen VLM model not loaded yet")
+            # Model not loaded — return an informative stub response
+            print(f"  [WARN] Model not loaded yet for {query_id}; returning stub.")
+            payload = {
+                "answer":       "Model is still loading. Please retry in 60 seconds.",
+                "confidence":   0.0,
+                "task":         task,
+                "processed_at": int(time.time() * 1000),
+            }
+            get_db().child(DB_RESULTS_PATH).child(query_id).set(payload)
+            get_db().child(DB_QUERIES_PATH).child(query_id).update({"status": "done"})
+            return
 
         bboxes = []
         bbox_object = None
@@ -217,25 +252,23 @@ class FirebaseListener:
 
         else:  # vqa (default)
             obj_label = self._detect_object_keyword(question)
-            is_count = self._is_counting_query(question)
-            has_cuda = (
-                getattr(self.model_manager, "_device", None) is not None
-                and "cuda" in str(self.model_manager._device)
-            )
-            if is_count and obj_label and has_cuda:
-                vqa_result = self.model_manager.answer_vqa(image, question)
-                answer = vqa_result["answer"]
-                confidence = vqa_result["confidence"]
+            is_count  = self._is_counting_query(question)
+
+            # Always run VQA first (works on both CPU and GPU)
+            vqa_result = self.model_manager.answer_vqa(image, question)
+            answer     = vqa_result["answer"]
+            confidence = vqa_result["confidence"]
+
+            # Try bounding-box detection (works on both CPU and GPU,
+            # but skipped if no matching object keyword in query)
+            if is_count and obj_label:
                 try:
                     detect_result = self.model_manager.detect_objects(image, obj_label)
-                    bboxes = detect_result["bboxes"]
-                    bbox_object = obj_label
+                    if detect_result.get("bboxes"):
+                        bboxes = detect_result["bboxes"]
+                        bbox_object = obj_label
                 except Exception as det_err:
-                    print(f"  Detection fallback failed: {det_err}")
-            else:
-                result = self.model_manager.answer_vqa(image, question)
-                answer = result["answer"]
-                confidence = result["confidence"]
+                    print(f"  Detection skipped: {det_err}")
 
         payload = {
             "answer":       answer,
@@ -285,11 +318,36 @@ class FirebaseListener:
 
         sat_agent = agent_mod.sat_agent
 
-        # Run the async agent pipeline in our dedicated event loop
-        report = self._loop.run_until_complete(
-            sat_agent.run(image, question)
-        )
-        rd = report.to_dict()
+        print(f"  [Agent] Starting pipeline for {query_id}...")
+        try:
+            # Run the async agent pipeline in our dedicated event loop
+            report = self._loop.run_until_complete(
+                sat_agent.run(image, question)
+            )
+            rd = report.to_dict()
+        except Exception as agent_err:
+            print(f"  [Agent] Pipeline error: {agent_err}")
+            # Write a graceful partial result so frontend gets something back
+            error_payload = {
+                "summary":          f"Agent pipeline encountered an error: {agent_err}",
+                "vlm_answer":       None,
+                "object_counts":    {},
+                "total_detections": 0,
+                "bboxes":           [],
+                "land_cover":       {},
+                "confidence":       0.0,
+                "tools_used":       [],
+                "routing_mode":     "error",
+                "errors":           [str(agent_err)],
+                "duration_ms":      0.0,
+                "question":         question,
+                "processed_at":     int(time.time() * 1000),
+            }
+            get_db().child(DB_AGENT_PATH).child(query_id).set(error_payload)
+            get_db().child(DB_QUERIES_PATH).child(query_id).update(
+                {"status": "done", "error": str(agent_err)}
+            )
+            return
 
         # Strip large base64 images before writing to RTDB (keep counts/text/percentages)
         payload = {

@@ -231,7 +231,7 @@ export async function submitQueryToFirebase(uid, imageBase64, question, task = '
  *
  * Returns an unsubscribe function — call it to stop listening.
  */
-export function listenForQueryResult(queryId, { onResult, onStatusChange, onError }) {
+export function listenForQueryResult(queryId, { onResult, onStatusChange, onHeartbeat, onError }) {
   if (!db || !queryId) return () => {};
 
   const resultRef  = dbRef(db, `results/${queryId}`);
@@ -241,27 +241,25 @@ export function listenForQueryResult(queryId, { onResult, onStatusChange, onErro
   const unsubResult = onValue(resultRef, (snap) => {
     if (snap.exists()) {
       const data = snap.val();
-      console.log(`✅ Result received for query ${queryId}:`, data);
+      console.log(`Result received for query ${queryId}:`, data);
       onResult && onResult(data);
     }
   }, (err) => {
-    console.warn("Result listener error:", err.message);
+    console.warn('Result listener error:', err.message);
     onError && onError(err.message);
   });
 
-  // Listen for status changes on /queries/{queryId}
+  // Listen for status + heartbeat changes on /queries/{queryId}
   const unsubQuery = onValue(queryRef, (snap) => {
     if (snap.exists()) {
-      const status = snap.val()?.status;
-      onStatusChange && onStatusChange(status);
+      const val = snap.val();
+      onStatusChange && onStatusChange(val?.status);
+      // Backend writes heartbeat: elapsed seconds every 30s during long inference
+      if (val?.heartbeat) onHeartbeat && onHeartbeat(val.heartbeat);
     }
   }, () => {});
 
-  // Return combined unsubscribe
-  return () => {
-    off(resultRef);
-    off(queryRef);
-  };
+  return () => { off(resultRef); off(queryRef); };
 }
 
 /**
@@ -406,7 +404,7 @@ export async function submitCNNQueryToFirebase(uid, imageBase64, tasks = ['detec
  *
  * Returns an unsubscribe function.
  */
-export function listenForAgentResult(queryId, { onResult, onStatusChange, onError }) {
+export function listenForAgentResult(queryId, { onResult, onStatusChange, onHeartbeat, onError }) {
   if (!db || !queryId) return () => {};
 
   const resultRef = dbRef(db, `agent_results/${queryId}`);
@@ -415,18 +413,19 @@ export function listenForAgentResult(queryId, { onResult, onStatusChange, onErro
   const unsubResult = onValue(resultRef, (snap) => {
     if (snap.exists()) {
       const data = snap.val();
-      console.log(`✅ Agent result received for query ${queryId}`);
+      console.log(`Agent result received for query ${queryId}`);
       onResult && onResult(data);
     }
   }, (err) => {
-    console.warn("Agent result listener error:", err.message);
+    console.warn('Agent result listener error:', err.message);
     onError && onError(err.message);
   });
 
   const unsubQuery = onValue(queryRef, (snap) => {
     if (snap.exists()) {
-      const status = snap.val()?.status;
-      onStatusChange && onStatusChange(status);
+      const val = snap.val();
+      onStatusChange && onStatusChange(val?.status);
+      if (val?.heartbeat) onHeartbeat && onHeartbeat(val.heartbeat);
     }
   }, () => {});
 
