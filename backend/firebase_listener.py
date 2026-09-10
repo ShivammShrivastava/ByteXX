@@ -1,5 +1,5 @@
 """
-Firebase Realtime Database Listener — Extended
+Firebase Realtime Database Listener -- Extended
 ================================================
 Listens for new queries written by the frontend,
 dispatches to the correct pipeline (VQA / Agent / CNN),
@@ -15,7 +15,7 @@ Realtime DB structure:
     timestamp:     int   (Unix ms)
     source:        str   ("frontend_web")
 
-  /results/{queryId}/         ← VQA / caption / refer answers
+  /results/{queryId}/         <- VQA / caption / refer answers
     answer:        str
     confidence:    float
     bboxes:        list   (optional)
@@ -23,7 +23,7 @@ Realtime DB structure:
     task:          str
     processed_at:  int
 
-  /agent_results/{queryId}/   ← Full AI Agent structured reports
+  /agent_results/{queryId}/   <- Full AI Agent structured reports
     summary:            str
     object_counts:      dict
     total_detections:   int
@@ -39,7 +39,7 @@ Realtime DB structure:
     errors:             list
     processed_at:       int
 
-  /cnn_results/{queryId}/     ← CNN-only results
+  /cnn_results/{queryId}/     <- CNN-only results
     object_counts:      dict
     total_detections:   int
     land_cover:         dict
@@ -77,19 +77,21 @@ class FirebaseListener:
     for pending queries and processes them via the correct pipeline.
 
     Supported task values:
-      "vqa"     → Qwen2.5-VL VQA  (writes to /results/)
-      "caption" → Qwen2.5-VL caption (writes to /results/)
-      "refer"   → Qwen2.5-VL referring expression (writes to /results/)
-      "agent"   → Full AI Agent pipeline (writes to /agent_results/)
-      "cnn"     → CNN-only pipeline (writes to /cnn_results/)
+      "vqa"     -> Qwen2.5-VL VQA  (writes to /results/)
+      "caption" -> Qwen2.5-VL caption (writes to /results/)
+      "refer"   -> Qwen2.5-VL referring expression (writes to /results/)
+      "agent"   -> Full AI Agent pipeline (writes to /agent_results/)
+      "cnn"     -> CNN-only pipeline (writes to /cnn_results/)
     """
 
     def __init__(self, model_manager):
         self.model_manager = model_manager
         self._running = False
         self._thread = None
-        self._poll_interval = 2  # seconds between polls
-        self._loop = None        # asyncio event loop for agent pipeline
+        self._poll_interval = 2        # seconds between polls
+        self._loop = None              # asyncio event loop for agent pipeline
+        self._auth_error_count = 0     # track consecutive JWT failures
+        self._last_auth_error = ""     # avoid repeated identical prints
 
     def start(self):
         """Start the background listener thread."""
@@ -100,7 +102,7 @@ class FirebaseListener:
             target=self._poll_loop, daemon=True, name="FirebaseListener"
         )
         self._thread.start()
-        print("  ✅ Firebase listener started (polling every 2s)")
+        print("  [OK] Firebase listener started (polling every 2s)")
 
     def stop(self):
         """Stop the listener."""
@@ -110,14 +112,33 @@ class FirebaseListener:
         print("  Firebase listener stopped")
 
     def _poll_loop(self):
-        """Main polling loop — creates a dedicated asyncio loop for async tools."""
+        """Main polling loop -- creates a dedicated asyncio loop for async tools."""
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         while self._running:
             try:
                 self._process_pending()
+                # Reset backoff on success
+                if self._auth_error_count > 0:
+                    self._auth_error_count = 0
+                    self._poll_interval = 2
+                    print("  [OK] Firebase connection restored")
             except Exception as e:
-                print(f"  Firebase listener error: {e}")
+                err_str = str(e)
+                is_jwt = "JWT" in err_str or "invalid_grant" in err_str
+                if is_jwt:
+                    self._auth_error_count += 1
+                    if err_str != self._last_auth_error:
+                        # Only print when the error message changes
+                        print(
+                            f"  [WARN]  Firebase JWT auth error (count={self._auth_error_count}): "
+                            f"Invalid JWT Signature -- run: w32tm /resync /force"
+                        )
+                        self._last_auth_error = err_str
+                    # Exponential backoff: 2s -> 4s -> 8s ... max 60s
+                    self._poll_interval = min(60, 2 ** min(self._auth_error_count, 6))
+                else:
+                    print(f"  Firebase listener error: {e}")
             time.sleep(self._poll_interval)
         self._loop.close()
 
@@ -143,7 +164,9 @@ class FirebaseListener:
             if "initialize_app()" in err_str:
                 time.sleep(10)
             else:
-                print(f"  DB read error: {e}")
+                # Re-raise so _poll_loop can classify it (JWT vs other)
+                raise
+
 
     def _handle_query(self, query_id: str, query_data: dict):
         """Dispatch to the correct pipeline based on task type."""
@@ -226,12 +249,12 @@ class FirebaseListener:
 
         get_db().child(DB_RESULTS_PATH).child(query_id).set(payload)
         get_db().child(DB_QUERIES_PATH).child(query_id).update({"status": "done"})
-        print(f"  ✅ VLM done {query_id}: '{answer[:60]}'")
+        print(f"  [OK] VLM done {query_id}: '{answer[:60]}'")
 
     # ─── AI Agent pipeline ────────────────────────────────────────────────────
 
     def _handle_agent(self, query_id, query_data, image, task):
-        """Handle full AI Agent pipeline — writes to /agent_results/."""
+        """Handle full AI Agent pipeline -- writes to /agent_results/."""
         question = query_data.get("question", "")
 
         # AI_Agents is registered by main.py's startup block; fall back to
@@ -294,7 +317,7 @@ class FirebaseListener:
         get_db().child(DB_AGENT_PATH).child(query_id).set(payload)
         get_db().child(DB_QUERIES_PATH).child(query_id).update({"status": "done"})
         print(
-            f"  ✅ Agent done {query_id}: "
+            f"  [OK] Agent done {query_id}: "
             f"conf={rd.get('confidence',0):.2f} | "
             f"tools={rd.get('tools_used',[])} | "
             f"{rd.get('duration_ms',0):.0f}ms"
@@ -303,7 +326,7 @@ class FirebaseListener:
     # ─── CNN pipeline ─────────────────────────────────────────────────────────
 
     def _handle_cnn(self, query_id, query_data, image, task):
-        """Handle CNN-only pipeline (detect + segment) — writes to /cnn_results/."""
+        """Handle CNN-only pipeline (detect + segment) -- writes to /cnn_results/."""
         tasks_param = query_data.get("cnn_tasks", ["detect", "segment"])
         conf_threshold = float(query_data.get("conf_threshold", 0.25))
 
@@ -333,7 +356,7 @@ class FirebaseListener:
         get_db().child(DB_CNN_PATH).child(query_id).set(payload)
         get_db().child(DB_QUERIES_PATH).child(query_id).update({"status": "done"})
         print(
-            f"  ✅ CNN done {query_id}: "
+            f"  [OK] CNN done {query_id}: "
             f"detections={rd.get('total_detections',0)} | "
             f"{rd.get('total_duration_ms',0):.0f}ms"
         )
@@ -342,7 +365,7 @@ class FirebaseListener:
 
     def _write_error(self, query_id: str, task: str, error_msg: str):
         """Write error to both /queries/ and the appropriate results path."""
-        print(f"  ❌ Error {query_id}: {error_msg}")
+        print(f"  [ERROR] Error {query_id}: {error_msg}")
 
         result_path = (
             DB_AGENT_PATH if task == "agent"

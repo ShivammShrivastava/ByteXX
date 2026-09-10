@@ -62,10 +62,10 @@ def init_firebase() -> bool:
         return True
 
     if not os.path.exists(SERVICE_ACCOUNT_PATH):
-        print(f"  ⚠  Firebase service account key NOT found at:")
+        print("  [WARN] Firebase service account key NOT found at:")
         for p in _SA_CANDIDATES:
-            print(f"       {p}")
-        print(f"  The backend will start but Firebase RTDB features won't work.")
+            print(f"         {p}")
+        print("  The backend will start but Firebase RTDB features won't work.")
         return False
 
     try:
@@ -76,11 +76,11 @@ def init_firebase() -> bool:
         })
         _initialized = True
         sa_name = os.path.basename(SERVICE_ACCOUNT_PATH)
-        print(f"  ✅ Firebase initialized — key: {sa_name}")
-        print(f"     RTDB: {FIREBASE_CONFIG['databaseURL']}")
+        print(f"  [OK] Firebase initialized -- key: {sa_name}")
+        print(f"       RTDB: {FIREBASE_CONFIG['databaseURL']}")
         return True
     except Exception as e:
-        print(f"  ❌ Firebase init failed: {e}")
+        print(f"  [ERROR] Firebase init failed: {e}")
         return False
 
 

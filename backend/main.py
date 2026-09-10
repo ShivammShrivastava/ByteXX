@@ -1,32 +1,32 @@
 """
-SatQuery AI — Complete FastAPI Backend
+SatQuery AI -- Complete FastAPI Backend
 ========================================
 Endpoints:
 
   System
   ──────
-  GET  /                      → Redirect to /docs
-  GET  /api/health            → Health check (GPU, VRAM, model status)
-  GET  /api/stats             → Query counts, uptime
+  GET  /                      -> Redirect to /docs
+  GET  /api/health            -> Health check (GPU, VRAM, model status)
+  GET  /api/stats             -> Query counts, uptime
 
-  REST Inference (direct — no Firebase)
+  REST Inference (direct -- no Firebase)
   ──────────────────────────────────────
-  POST /api/vqa               → VQA with base64 image JSON
-  POST /api/vqa/upload        → VQA with file upload
-  POST /api/caption           → Caption with base64 image JSON
-  POST /api/caption/upload    → Caption with file upload
-  POST /api/refer             → Referring grounding with base64 JSON
-  POST /api/refer/upload      → Referring grounding with file upload
+  POST /api/vqa               -> VQA with base64 image JSON
+  POST /api/vqa/upload        -> VQA with file upload
+  POST /api/caption           -> Caption with base64 image JSON
+  POST /api/caption/upload    -> Caption with file upload
+  POST /api/refer             -> Referring grounding with base64 JSON
+  POST /api/refer/upload      -> Referring grounding with file upload
 
   Firebase Integration
   ─────────────────────
-  POST /api/firebase/submit   → Submit query via Firebase (writes to Realtime DB)
-  GET  /api/firebase/query/{id}  → Get query status from Firebase
-  GET  /api/firebase/result/{id} → Get result from Firebase
+  POST /api/firebase/submit   -> Submit query via Firebase (writes to Realtime DB)
+  GET  /api/firebase/query/{id}  -> Get query status from Firebase
+  GET  /api/firebase/result/{id} -> Get result from Firebase
 
 Usage:
     uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
-    Swagger UI → http://localhost:8000/docs
+    Swagger UI -> http://localhost:8000/docs
 """
 
 import base64
@@ -48,7 +48,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-# Alias "AI Agents" (folder with space) → AI_Agents so Python can import it
+# Alias "AI Agents" (folder with space) -> AI_Agents so Python can import it
 if "AI_Agents" not in sys.modules:
     import importlib.util as _ilu
 
@@ -72,7 +72,7 @@ if "AI_Agents" not in sys.modules:
         if _sub_spec:
             _sub_mod = _ilu.module_from_spec(_sub_spec)
             sys.modules[f"AI_Agents.{_sub}"] = _sub_mod
-            _sub_spec.loader.exec_module(_sub_mod)   # ← execute each sub-module
+            _sub_spec.loader.exec_module(_sub_mod)   # <- execute each sub-module
 
     # Now execute the __init__ (its imports will resolve from sys.modules)
     _pkg_spec.loader.exec_module(_pkg_mod)
@@ -113,7 +113,7 @@ async def lifespan(app: FastAPI):
 
     print()
     print("=" * 60)
-    print("  SatQuery AI Backend — Starting")
+    print("  SatQuery AI Backend -- Starting")
     print("=" * 60)
 
     # Load model
@@ -145,7 +145,7 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     _firebase_listener.stop()
-    print("SatQuery AI — Shut down.")
+    print("SatQuery AI -- Shut down.")
 
 
 # ─────────────────────────────────────────────
@@ -242,7 +242,7 @@ async def stats():
 @app.post("/api/vqa", response_model=VQAResponse, tags=["Inference"])
 async def vqa_json(req: VQARequest):
     """
-    Visual Question Answering — send base64 image + question.
+    Visual Question Answering -- send base64 image + question.
 
     Example question: *"How many buildings are visible?"*
     """
@@ -259,7 +259,7 @@ async def vqa_upload(
     file: UploadFile = File(..., description="Image file (PNG/JPEG)"),
     question: str = Form(..., description="Your question about the image"),
 ):
-    """Visual Question Answering — upload image as multipart form."""
+    """Visual Question Answering -- upload image as multipart form."""
     _check_model()
     image = await _read_upload(file)
     result = model_manager.answer_vqa(image, question)
@@ -284,7 +284,7 @@ async def caption_json(req: CaptionRequest):
 async def caption_upload(
     file: UploadFile = File(..., description="Image file (PNG/JPEG)"),
 ):
-    """Generate a detailed description — upload image as multipart form."""
+    """Generate a detailed description -- upload image as multipart form."""
     _check_model()
     image = await _read_upload(file)
     result = model_manager.generate_caption(image)
@@ -297,7 +297,7 @@ async def caption_upload(
 @app.post("/api/refer", response_model=ReferringResponse, tags=["Inference"])
 async def refer_json(req: ReferringRequest):
     """
-    Referring Expression Grounding — locate an object described in text (base64 image).
+    Referring Expression Grounding -- locate an object described in text (base64 image).
 
     Returns bounding box `[x1, y1, x2, y2]` normalized to `[0, 1]`.
     Example expression: *"The large white building in the top-left"*
@@ -315,7 +315,7 @@ async def refer_upload(
     file: UploadFile = File(..., description="Image file (PNG/JPEG)"),
     expression: str = Form(..., description="Text description of object to locate"),
 ):
-    """Referring Expression Grounding — upload image as multipart form."""
+    """Referring Expression Grounding -- upload image as multipart form."""
     _check_model()
     image = await _read_upload(file)
     result = model_manager.locate_object(image, expression)
@@ -363,7 +363,7 @@ async def firebase_query_status(query_id: str):
     """
     Get the current status of a Firebase query.
 
-    Status values: `pending` → `processing` → `done` | `error`
+    Status values: `pending` -> `processing` -> `done` | `error`
     """
     if not _firebase_ok:
         raise HTTPException(503, "Firebase not connected.")
@@ -410,7 +410,7 @@ async def firebase_result(query_id: str):
 @app.post("/api/cnn/detect", response_model=CNNDetectResponse, tags=["CNN"])
 async def cnn_detect_endpoint(req: CNNDetectRequest):
     """
-    **YOLOv8 Object Detection** — instant counting + square bounding boxes.
+    **YOLOv8 Object Detection** -- instant counting + square bounding boxes.
 
     Returns detected objects with normalized bboxes [x1,y1,x2,y2] and
     an annotated image (base64 PNG) with square boxes drawn around each object.
@@ -447,7 +447,7 @@ async def cnn_detect_upload(
     conf_threshold: float = Form(0.25),
     target_classes: Optional[str] = Form(None, description="Comma-separated class names"),
 ):
-    """YOLOv8 Object Detection — multipart file upload."""
+    """YOLOv8 Object Detection -- multipart file upload."""
     image = await _read_upload(file)
     from CNN.yolo_detector import yolo_detector
     det = yolo_detector.detect(image, conf_threshold=conf_threshold)
@@ -471,7 +471,7 @@ async def cnn_detect_upload(
 @app.post("/api/cnn/segment", response_model=CNNSegmentResponse, tags=["CNN"])
 async def cnn_segment_endpoint(req: CNNSegmentRequest):
     """
-    **ResNet/FCN Land Cover Segmentation** — pixel-level surface density.
+    **ResNet/FCN Land Cover Segmentation** -- pixel-level surface density.
 
     Returns exact percentages for:
     - Vegetation / Forest Canopy
@@ -499,7 +499,7 @@ async def cnn_segment_endpoint(req: CNNSegmentRequest):
 
 @app.post("/api/cnn/segment/upload", response_model=CNNSegmentResponse, tags=["CNN"])
 async def cnn_segment_upload(file: UploadFile = File(..., description="Image file (PNG/JPEG)")):
-    """ResNet/FCN Land Cover Segmentation — multipart file upload."""
+    """ResNet/FCN Land Cover Segmentation -- multipart file upload."""
     image = await _read_upload(file)
     from CNN.segmentation import land_cover_segmenter, CLASS_DISPLAY_NAMES
     seg = land_cover_segmenter.segment(image)
@@ -518,7 +518,7 @@ async def cnn_segment_upload(file: UploadFile = File(..., description="Image fil
 @app.post("/api/cnn/full", response_model=CNNFullResponse, tags=["CNN"])
 async def cnn_full_endpoint(req: CNNFullRequest):
     """
-    **Full CNN Pipeline** — detection + segmentation in parallel.
+    **Full CNN Pipeline** -- detection + segmentation in parallel.
 
     Runs YOLOv8 detection and ResNet/FCN segmentation concurrently.
     """
@@ -536,7 +536,7 @@ async def cnn_full_upload(
     tasks: str = Form("detect,segment"),
     conf_threshold: float = Form(0.25),
 ):
-    """Full CNN Pipeline — multipart file upload."""
+    """Full CNN Pipeline -- multipart file upload."""
     image = await _read_upload(file)
     from CNN.cnn_pipeline import cnn_pipeline
     task_list = [t.strip() for t in tasks.split(",")]
@@ -585,7 +585,7 @@ async def agent_status():
 @app.post("/api/agent/analyze", response_model=AgentAnalyzeResponse, tags=["AI Agent"])
 async def agent_analyze(req: AgentAnalyzeRequest):
     """
-    **Full AI Agent Pipeline** — intelligent multi-tool satellite image analysis.
+    **Full AI Agent Pipeline** -- intelligent multi-tool satellite image analysis.
 
     The agent:
     1. **Routes** the query (fast CNN vs heavy VLM vs Hybrid)
@@ -612,7 +612,7 @@ async def agent_analyze_upload(
     conf_threshold: float = Form(0.25, description="YOLO detection confidence threshold"),
 ):
     """
-    **Full AI Agent Pipeline** — multipart file upload version.
+    **Full AI Agent Pipeline** -- multipart file upload version.
 
     Same as `/api/agent/analyze` but accepts a file upload instead of base64.
     """

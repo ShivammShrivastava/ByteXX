@@ -9,7 +9,7 @@ Usage:
 
 Prerequisites:
     1. Download your service account key from Firebase Console:
-       Firebase Console → Project Settings → Service Accounts → Generate new private key
+       Firebase Console -> Project Settings -> Service Accounts -> Generate new private key
     2. Save the downloaded JSON as: backend/serviceAccountKey.json
 """
 
@@ -37,13 +37,13 @@ if not KEY_PATH:
     for p in _SA_CANDIDATES:
         print(f"    {p}")
     print()
-    print("  Download from Firebase Console → Project Settings → Service Accounts")
-    print("  → Generate new private key → save to backend/ folder")
+    print("  Download from Firebase Console -> Project Settings -> Service Accounts")
+    print("  -> Generate new private key -> save to backend/ folder")
     sys.exit(1)
 
 # ── Initialize Firebase ──
 print("=" * 60)
-print("  SatQuery AI — Firebase Setup & Test")
+print("  SatQuery AI -- Firebase Setup & Test")
 print("=" * 60)
 
 import firebase_admin
@@ -72,23 +72,23 @@ print(f"  OK - DB write/read successful: {val}")
 print("\n[3/4] Initializing database schema...")
 ref.child("_schema").set({
     "version":      "2.0",
-    "description":  "ByteX SatQuery AI — Full Schema (VQA + Agent + CNN)",
+    "description":  "ByteX SatQuery AI -- Full Schema (VQA + Agent + CNN)",
     "project":      "satellite-efa0a",
     "app_id":       "1:504899672780:web:4f61a1b212930752cdc069",
     "paths": {
-        "queries":        "/queries/{queryId}     — all incoming jobs (status: pending→processing→done|error)",
-        "results":        "/results/{queryId}     — VQA / caption / refer answers from Qwen2.5-VL",
-        "agent_results":  "/agent_results/{queryId} — full AI Agent structured reports",
-        "cnn_results":    "/cnn_results/{queryId}   — CNN detection + segmentation results",
-        "users":          "/users/{uid}/profile    — user profile",
-        "users_recents":  "/users/{uid}/recents/{id} — query history per user",
+        "queries":        "/queries/{queryId}     -- all incoming jobs (status: pending->processing->done|error)",
+        "results":        "/results/{queryId}     -- VQA / caption / refer answers from Qwen2.5-VL",
+        "agent_results":  "/agent_results/{queryId} -- full AI Agent structured reports",
+        "cnn_results":    "/cnn_results/{queryId}   -- CNN detection + segmentation results",
+        "users":          "/users/{uid}/profile    -- user profile",
+        "users_recents":  "/users/{uid}/recents/{id} -- query history per user",
     },
     "task_types": {
-        "vqa":     "Qwen2.5-VL Visual Question Answering → /results/",
-        "caption": "Qwen2.5-VL Image Captioning        → /results/",
-        "refer":   "Qwen2.5-VL Referring Expression    → /results/",
-        "agent":   "AI Agent (Route+Plan+Execute+Verify+Merge) → /agent_results/",
-        "cnn":     "YOLOv8 + ResNet/FCN CNN pipeline   → /cnn_results/",
+        "vqa":     "Qwen2.5-VL Visual Question Answering -> /results/",
+        "caption": "Qwen2.5-VL Image Captioning        -> /results/",
+        "refer":   "Qwen2.5-VL Referring Expression    -> /results/",
+        "agent":   "AI Agent (Route+Plan+Execute+Verify+Merge) -> /agent_results/",
+        "cnn":     "YOLOv8 + ResNet/FCN CNN pipeline   -> /cnn_results/",
     },
     "last_updated": int(time.time() * 1000),
 })
@@ -100,20 +100,20 @@ for path in ["queries", "results", "agent_results", "cnn_results", "users"]:
         ref.child(path).child("_placeholder").set({"initialized": True})
         ref.child(path).child("_placeholder").delete()
 
-print("  ✅ Schema initialized (v2.0)")
+print("  [OK] Schema initialized (v2.0)")
 
 # ── Test Storage ───────────────────────────────────────────────────────────────
 print("\n[4/4] Testing Firebase Storage connection...")
 try:
     bucket = storage.bucket()
-    print(f"  ✅ Storage bucket: {bucket.name}")
+    print(f"  [OK] Storage bucket: {bucket.name}")
 except Exception as e:
-    print(f"  ⚠  Storage test skipped: {e}")
+    print(f"  [WARN]  Storage test skipped: {e}")
 
 # ── Done ───────────────────────────────────────────────────────────────────────
 print()
 print("=" * 60)
-print("  SETUP COMPLETE — satellite-efa0a")
+print("  SETUP COMPLETE -- satellite-efa0a")
 print("=" * 60)
 print()
 print("  RTDB URL:  https://satellite-efa0a-default-rtdb.firebaseio.com")
@@ -121,11 +121,11 @@ print("  Storage:   satellite-efa0a.firebasestorage.app")
 print("  App ID:    1:504899672780:web:4f61a1b212930752cdc069")
 print()
 print("  Database paths:")
-print("    /queries/{id}        — incoming jobs")
-print("    /results/{id}        — VQA / caption / refer answers")
-print("    /agent_results/{id}  — AI Agent full reports")
-print("    /cnn_results/{id}    — CNN detection + segmentation")
-print("    /users/{uid}/        — user profiles + history")
+print("    /queries/{id}        -- incoming jobs")
+print("    /results/{id}        -- VQA / caption / refer answers")
+print("    /agent_results/{id}  -- AI Agent full reports")
+print("    /cnn_results/{id}    -- CNN detection + segmentation")
+print("    /users/{uid}/        -- user profiles + history")
 print()
 print("  Start backend:")
 print("    uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload")
