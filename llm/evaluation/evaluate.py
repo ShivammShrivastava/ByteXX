@@ -8,7 +8,7 @@ Can run on:
 Usage (local):
     python evaluation/evaluate.py \
         --model-path "YOUR_HF_USERNAME/satquery-ai-vqa-lora" \
-        --dataset-dir "C:\Users\IPS\Desktop\dataset" \
+        --dataset-dir "C:\Users\Suryansh\OneDrive\Desktop\dataset" \
         --output-dir "outputs/results"
 
 Usage (Colab, after training):
@@ -42,7 +42,7 @@ except ImportError:
 # ─────────────────────────────────────────────
 # Configuration
 # ─────────────────────────────────────────────
-DEFAULT_DATASET_DIR = r"C:\Users\IPS\Desktop\dataset"
+DEFAULT_DATASET_DIR = r"C:\Users\Suryansh\OneDrive\Desktop\dataset"
 DEFAULT_MODEL_PATH = "YOUR_HF_USERNAME/satquery-ai-vqa-lora"
 BASE_MODEL_NAME = "Qwen/Qwen2.5-VL-7B-Instruct"
 

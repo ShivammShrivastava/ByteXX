@@ -292,7 +292,6 @@ export async function registerWithEmail(email, password, displayName) {
   if (displayName) {
     try { await updateProfile(cred.user, { displayName }); } catch (_) {}
   }
-  // Re-read user after profile update
   await saveUserData({ ...cred.user, displayName }, { displayName, createdAt: new Date().toISOString() });
   return cred.user;
 }
@@ -315,10 +314,8 @@ export function onAuthChange(callback) {
   if (auth) {
     return onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser) {
-        // Enrich with any extra data from RTDB
         callback(firebaseUser);
       } else {
-        // Check localStorage for a cached local/demo session
         try {
           const cached = localStorage.getItem('bytex_active_user');
           callback(cached ? JSON.parse(cached) : null);
@@ -335,6 +332,158 @@ export function onAuthChange(callback) {
     callback(null);
   }
   return () => {};
+}
+
+// ─── AI Agent Query Pipeline ─────────────────────────────────────────────────
+
+/**
+ * Submit an AI Agent query to Firebase RTDB.
+ * The backend listener picks this up, runs the full 5-stage agent pipeline,
+ * and writes the structured report to /agent_results/{queryId}.
+ *
+ * @param {string} uid          - Firebase user ID
+ * @param {string} imageBase64  - Plain base64 string of the image (no data: prefix)
+ * @param {string} question     - User's natural-language question
+ * @param {number} confThreshold - YOLO confidence threshold (default 0.25)
+ * @returns {Promise<string>}   queryId
+ */
+export async function submitAgentQueryToFirebase(uid, imageBase64, question, confThreshold = 0.25) {
+  if (!db) throw new Error("Firebase Database not initialized");
+
+  const queriesRef = dbRef(db, 'queries');
+  const newQuery = {
+    uid,
+    image_base64: imageBase64,
+    question,
+    task: 'agent',                 // ← listener routes to AI Agent pipeline
+    conf_threshold: confThreshold,
+    status: 'pending',
+    timestamp: Date.now(),
+    source: 'frontend_web',
+  };
+
+  const newRef = await push(queriesRef, newQuery);
+  const queryId = newRef.key;
+  console.log(`✅ Agent query submitted to RTDB: /queries/${queryId}`);
+  return queryId;
+}
+
+/**
+ * Submit a CNN-only query to Firebase RTDB.
+ * The backend runs YOLOv8 detection and/or ResNet/FCN segmentation
+ * and writes the result to /cnn_results/{queryId}.
+ *
+ * @param {string}   uid           - Firebase user ID
+ * @param {string}   imageBase64   - Plain base64 string (no data: prefix)
+ * @param {string[]} tasks         - ["detect", "segment"] or just one of them
+ * @param {number}   confThreshold - YOLO confidence threshold
+ * @returns {Promise<string>}      queryId
+ */
+export async function submitCNNQueryToFirebase(uid, imageBase64, tasks = ['detect', 'segment'], confThreshold = 0.25) {
+  if (!db) throw new Error("Firebase Database not initialized");
+
+  const queriesRef = dbRef(db, 'queries');
+  const newQuery = {
+    uid,
+    image_base64: imageBase64,
+    task: 'cnn',                   // ← listener routes to CNN pipeline
+    cnn_tasks: tasks,
+    conf_threshold: confThreshold,
+    status: 'pending',
+    timestamp: Date.now(),
+    source: 'frontend_web',
+  };
+
+  const newRef = await push(queriesRef, newQuery);
+  const queryId = newRef.key;
+  console.log(`✅ CNN query submitted to RTDB: /queries/${queryId}`);
+  return queryId;
+}
+
+/**
+ * Listen in real-time for an AI Agent result at /agent_results/{queryId}.
+ * Calls onResult(data) as soon as the backend writes the report.
+ *
+ * Returns an unsubscribe function.
+ */
+export function listenForAgentResult(queryId, { onResult, onStatusChange, onError }) {
+  if (!db || !queryId) return () => {};
+
+  const resultRef = dbRef(db, `agent_results/${queryId}`);
+  const queryRef  = dbRef(db, `queries/${queryId}`);
+
+  const unsubResult = onValue(resultRef, (snap) => {
+    if (snap.exists()) {
+      const data = snap.val();
+      console.log(`✅ Agent result received for query ${queryId}`);
+      onResult && onResult(data);
+    }
+  }, (err) => {
+    console.warn("Agent result listener error:", err.message);
+    onError && onError(err.message);
+  });
+
+  const unsubQuery = onValue(queryRef, (snap) => {
+    if (snap.exists()) {
+      const status = snap.val()?.status;
+      onStatusChange && onStatusChange(status);
+    }
+  }, () => {});
+
+  return () => { off(resultRef); off(queryRef); };
+}
+
+/**
+ * Listen in real-time for a CNN result at /cnn_results/{queryId}.
+ * Returns an unsubscribe function.
+ */
+export function listenForCNNResult(queryId, { onResult, onStatusChange, onError }) {
+  if (!db || !queryId) return () => {};
+
+  const resultRef = dbRef(db, `cnn_results/${queryId}`);
+  const queryRef  = dbRef(db, `queries/${queryId}`);
+
+  const unsubResult = onValue(resultRef, (snap) => {
+    if (snap.exists()) {
+      const data = snap.val();
+      console.log(`✅ CNN result received for query ${queryId}`);
+      onResult && onResult(data);
+    }
+  }, (err) => {
+    console.warn("CNN result listener error:", err.message);
+    onError && onError(err.message);
+  });
+
+  const unsubQuery = onValue(queryRef, (snap) => {
+    if (snap.exists()) {
+      const status = snap.val()?.status;
+      onStatusChange && onStatusChange(status);
+    }
+  }, () => {});
+
+  return () => { off(resultRef); off(queryRef); };
+}
+
+/**
+ * One-time read of /agent_results/{queryId} (for rehydrating saved sessions).
+ */
+export async function getAgentResult(queryId) {
+  if (!db || !queryId) return null;
+  try {
+    const snap = await get(dbRef(db, `agent_results/${queryId}`));
+    return snap.exists() ? snap.val() : null;
+  } catch (e) { return null; }
+}
+
+/**
+ * One-time read of /cnn_results/{queryId} (for rehydrating saved sessions).
+ */
+export async function getCNNResult(queryId) {
+  if (!db || !queryId) return null;
+  try {
+    const snap = await get(dbRef(db, `cnn_results/${queryId}`));
+    return snap.exists() ? snap.val() : null;
+  } catch (e) { return null; }
 }
 
 export { auth, db };

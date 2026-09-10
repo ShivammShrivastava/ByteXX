@@ -11,7 +11,7 @@ import os
 # ─────────────────────────────────────────────
 # This tells transformers to use the locally downloaded model
 # instead of downloading from the internet.
-_HF_HOME = os.environ.get("HF_HOME", r"C:\Users\IPS\Desktop\huggingface")
+_HF_HOME = os.environ.get("HF_HOME", r"C:\Users\Suryansh\OneDrive\Desktop\huggingface")
 os.environ.setdefault("HF_HOME", _HF_HOME)
 os.environ.setdefault("TRANSFORMERS_CACHE", os.path.join(_HF_HOME, "hub"))
 os.environ.setdefault("HUGGINGFACE_HUB_CACHE", os.path.join(_HF_HOME, "hub"))
@@ -34,7 +34,7 @@ HF_LORA_REPO = os.environ.get(
 # Local path to a saved LoRA adapter directory (fastest — no download)
 LOCAL_ADAPTER_PATH = os.environ.get(
     "SATQUERY_ADAPTER_PATH",
-    r"C:\Users\IPS\Desktop\satquery-ai-vqa-lora"
+    r"C:\Users\Suryansh\OneDrive\Desktop\satquery-ai-vqa-lora"
 )
 
 # Enable 4-bit NF4 quantization (needs bitsandbytes + CUDA)

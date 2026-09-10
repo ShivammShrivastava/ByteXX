@@ -25,8 +25,8 @@ if sys.platform == "win32":
 # ─────────────────────────────────────────────
 # Configuration
 # ─────────────────────────────────────────────
-DATASET_DIR = r"C:\Users\IPS\Desktop\dataset"
-OUTPUT_DIR = r"C:\Users\IPS\Desktop\Satellite\data\processed"
+DATASET_DIR = r"C:\Users\Suryansh\OneDrive\Desktop\dataset"
+OUTPUT_DIR = r"C:\Users\Suryansh\OneDrive\Desktop\Satellite\data\processed"
 
 RS_SYSTEM_PROMPT = (
     "You are SatQuery AI, a remote sensing image analysis expert specializing in "

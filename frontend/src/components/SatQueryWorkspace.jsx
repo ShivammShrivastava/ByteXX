@@ -26,6 +26,7 @@ import {
   Menu,
   X,
   ChevronRight,
+  Bot,
 } from 'lucide-react';
 import {
   saveRecentQuery,
@@ -35,9 +36,12 @@ import {
   fileToBase64,
   submitQueryToFirebase,
   listenForQueryResult,
+  submitAgentQueryToFirebase,
+  listenForAgentResult,
 } from '../firebase/firebaseConfig';
 import StarField from './StarField';
 import ProfilePanel from './ProfilePanel';
+import AgentPanel from './AgentPanel';
 import './SatQueryWorkspace.css';
 
 // ─── Preset Datasets (demo / offline fallback) ───────────────────────────────
@@ -128,7 +132,7 @@ const STATUS_STEPS = {
 };
 
 // ─── Pipeline timeout (ms) — if backend doesn't respond within this, show timeout ──
-const RESULT_TIMEOUT_MS = 120_000; // 2 minutes
+const RESULT_TIMEOUT_MS = 300_000; // 5 minutes
 
 // ─── Object keywords that trigger per-instance detection boxes ───────────────
 const OBJECT_KEYWORDS = [
@@ -509,6 +513,10 @@ export default function SatQueryWorkspace({ user, onLogout }) {
   const [isListening, setIsListening]       = useState(false);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [isProfileOpen, setIsProfileOpen]   = useState(false);
+  // ─── AI Agent mode ─────────────────────────────────────────────────────────
+  const [agentMode, setAgentMode]           = useState(false);
+  const [agentReport, setAgentReport]       = useState(null);   // AgentAnalyzeResponse from backend
+  const [isAgentAnalyzing, setIsAgentAnalyzing] = useState(false);
 
   const fileInputRef     = useRef(null);
   const unsubListenerRef = useRef(null);   // Firebase listener cleanup
@@ -772,6 +780,135 @@ export default function SatQueryWorkspace({ user, onLogout }) {
     metrics:      fbData.metrics || null,
   });
 
+  // ─── AI AGENT ANALYSIS PIPELINE (via Firebase RTDB) ────────────────────
+  const handleRunAgentAnalysis = async () => {
+    if (isAgentAnalyzing) return;
+    const primaryFile = uploadedFiles[0] || null;
+    if (!primaryFile && uploadedImages.length === 0) return;
+    if (!currentQuery.trim()) return;
+
+    // Stop any previous listener
+    unsubListenerRef.current?.();
+    clearTimeout(timeoutRef.current);
+
+    setIsAgentAnalyzing(true);
+    setAgentReport(null);
+    setQueryError(null);
+    setQueryStatus('encoding');
+
+    try {
+      // Step 1 — Encode image to base64
+      let imageB64;
+      if (primaryFile) {
+        imageB64 = await fileToBase64(primaryFile, 1024);
+      } else {
+        // Preset URL — fetch and encode
+        const resp = await fetch(uploadedImages[0]?.url);
+        const blob = await resp.blob();
+        imageB64 = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result.split(',')[1]);
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+      }
+
+      setQueryStatus('pending');
+
+      // Step 2 — Submit agent query to Firebase RTDB
+      const queryId = await submitAgentQueryToFirebase(
+        user?.uid || 'anonymous',
+        imageB64,
+        currentQuery,
+        0.25,
+      );
+
+      setQueryStatus('processing');
+
+      // Step 3 — Listen for agent result from /agent_results/{queryId}
+      const AGENT_TIMEOUT_MS = 180_000; // 3 min (agent runs CNN + VLM)
+
+      const unsubAgent = listenForAgentResult(queryId, {
+        onResult: (data) => {
+          clearTimeout(timeoutRef.current);
+          unsubAgent();
+          unsubListenerRef.current = null;
+
+          // Map RTDB agent result to AgentPanel report shape
+          const report = {
+            summary:             data.summary             || '',
+            vlm_answer:          data.vlm_answer          || null,
+            caption:             data.caption             || null,
+            object_counts:       data.object_counts       || {},
+            total_detections:    data.total_detections    || 0,
+            bboxes:              data.bboxes              || [],
+            bbox_labels:         data.bbox_labels         || [],
+            bbox_confidences:    data.bbox_confidences    || [],
+            annotated_image_b64: data.annotated_image_b64 || null,
+            land_cover:          data.land_cover          || {},
+            land_cover_display:  data.land_cover_display  || {},
+            dominant_land_cover: data.dominant_land_cover || '',
+            mask_image_b64:      data.mask_image_b64      || null,
+            confidence:          data.confidence          || 0,
+            tools_used:          data.tools_used          || [],
+            routing_mode:        data.routing_mode        || '',
+            execution_steps:     data.execution_steps     || [],
+            verification_log:    data.verification_log    || [],
+            reasoning_trace:     data.reasoning_trace     || '',
+            errors:              data.errors              || [],
+            duration_ms:         data.duration_ms         || 0,
+          };
+
+          setAgentReport(report);
+          setActiveTab('agent');
+          setQueryStatus('done');
+          setIsAgentAnalyzing(false);
+
+          // Save to recents
+          if (user?.uid) {
+            saveRecentQuery(user.uid, {
+              id: queryId,
+              title: currentQuery.length > 40 ? currentQuery.slice(0, 40) + '…' : currentQuery,
+              query: currentQuery,
+              taskType: 'agent',
+              timestamp: Date.now(),
+              images: uploadedImages.map(i => ({ ...i, url: i.url })),
+            });
+          }
+        },
+        onStatusChange: (status) => {
+          if (status === 'error') {
+            clearTimeout(timeoutRef.current);
+            setQueryError('Agent pipeline failed on the backend. Check server logs.');
+            setQueryStatus('error');
+            setIsAgentAnalyzing(false);
+          }
+        },
+        onError: (msg) => {
+          clearTimeout(timeoutRef.current);
+          setQueryError(`Agent listener error: ${msg}`);
+          setQueryStatus('error');
+          setIsAgentAnalyzing(false);
+        },
+      });
+
+      unsubListenerRef.current = unsubAgent;
+
+      // Timeout guard
+      timeoutRef.current = setTimeout(() => {
+        unsubAgent();
+        setQueryError('Agent analysis timed out (3 min). The model may be loading — try again.');
+        setQueryStatus('timeout');
+        setIsAgentAnalyzing(false);
+      }, AGENT_TIMEOUT_MS);
+
+    } catch (err) {
+      setQueryError(`Agent analysis failed: ${err.message}`);
+      setQueryStatus('error');
+      setIsAgentAnalyzing(false);
+    }
+  };
+
   // ─── MAIN ANALYSIS PIPELINE ──────────────────────────────────────────────
   const handleRunAnalysis = async () => {
     if (isAnalyzing) return;
@@ -854,7 +991,7 @@ export default function SatQueryWorkspace({ user, onLogout }) {
         unsubListenerRef.current?.();
         if (queryStatus !== 'done') {
           setQueryStatus('timeout');
-          setQueryError('The backend did not respond within 2 minutes. Make sure it is running and Firebase is connected.');
+          setQueryError('The backend did not respond in time. Make sure it is running and Firebase is connected.');
           setIsAnalyzing(false);
         }
       }, RESULT_TIMEOUT_MS);
@@ -1151,6 +1288,28 @@ export default function SatQueryWorkspace({ user, onLogout }) {
                   <Plus size={22} />
                 </button>
 
+                {/* AI Agent mode toggle */}
+                <button
+                  id="agent-mode-toggle"
+                  title={agentMode ? 'Agent mode ON — click to switch to standard mode' : 'Switch to AI Agent mode'}
+                  onClick={() => setAgentMode(v => !v)}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 4,
+                    padding: '5px 10px', borderRadius: 8, border: 'none', cursor: 'pointer',
+                    fontSize: 11, fontWeight: 700, letterSpacing: '0.04em',
+                    transition: 'all 0.2s',
+                    background: agentMode
+                      ? 'linear-gradient(135deg, rgba(99,102,241,0.3), rgba(139,92,246,0.3))'
+                      : 'rgba(30,41,59,0.6)',
+                    color: agentMode ? '#a5b4fc' : '#64748b',
+                    border: agentMode ? '1px solid rgba(99,102,241,0.5)' : '1px solid rgba(51,65,85,0.5)',
+                    flexShrink: 0,
+                  }}
+                >
+                  <Bot size={14} />
+                  Agent
+                </button>
+
                 <input
                   type="file"
                   ref={fileInputRef}
@@ -1173,10 +1332,10 @@ export default function SatQueryWorkspace({ user, onLogout }) {
                 {/* Mic when no text, Send when text is typed */}
                 {(currentQuery.trim() || uploadedImages.length > 0) ? (
                   <button
-                    className={`send-query-btn ${!isAnalyzing ? 'active' : ''}`}
-                    onClick={handleRunAnalysis}
-                    disabled={isAnalyzing}
-                    title="Run analysis"
+                    className={`send-query-btn ${!isAnalyzing && !isAgentAnalyzing ? 'active' : ''}`}
+                    onClick={agentMode ? handleRunAgentAnalysis : handleRunAnalysis}
+                    disabled={isAnalyzing || isAgentAnalyzing}
+                    title={agentMode ? 'Run AI Agent analysis' : 'Run analysis'}
                   >
                     <Send size={18} />
                   </button>
@@ -1243,12 +1402,16 @@ export default function SatQueryWorkspace({ user, onLogout }) {
           )}
 
           {/* ── Processing spinner ───────────────────────────────────────── */}
-          {isAnalyzing && queryStatus === 'processing' && (
+          {(isAnalyzing && queryStatus === 'processing') || isAgentAnalyzing ? (
             <div className="analyzing-state">
-              <div className="analyzing-spinner"></div>
-              <span className="analyzing-text">Qwen2.5-VL analyzing your image…</span>
+              <div className="analyzing-spinner" />
+              <span className="analyzing-text">
+                {isAgentAnalyzing
+                  ? 'AI Agent running pipeline… (Route → Plan → Execute → Verify → Merge)'
+                  : 'Qwen2.5-VL analyzing your image…'}
+              </span>
             </div>
-          )}
+          ) : null}
 
           {/* ── Results ──────────────────────────────────────────────────── */}
           {analysisResult && !isAnalyzing && (
@@ -1379,6 +1542,54 @@ export default function SatQueryWorkspace({ user, onLogout }) {
                   )}
                 </div>
               )}
+
+              {/* Tab: AI Agent Panel — inside analysisResult context */}
+              {activeTab === 'agent' && (
+                <AgentPanel
+                  report={agentReport}
+                  isLoading={isAgentAnalyzing}
+                  imageUrl={uploadedImages[0]?.url}
+                  imageB64={null}
+                  question={currentQuery}
+                />
+              )}
+            </div>
+          )}
+
+          {/* ── Standalone Agent Panel (when no standard analysisResult) ─── */}
+          {agentReport && !analysisResult && !isAgentAnalyzing && (
+            <div className="analysis-result-below">
+              <div className="result-tabs-nav">
+                <button
+                  id="agent-tab-btn-standalone"
+                  className="tab-btn active"
+                  style={{ color: '#a5b4fc' }}
+                >
+                  <Bot size={16} />
+                  <span>AI Agent Report</span>
+                </button>
+                <div className="tab-spacer" />
+                <span className="conf-badge">
+                  {Math.round((agentReport.confidence || 0) * 100)}% confidence
+                </span>
+              </div>
+              <AgentPanel
+                report={agentReport}
+                isLoading={false}
+                imageUrl={uploadedImages[0]?.url}
+                question={currentQuery}
+              />
+            </div>
+          )}
+
+          {/* ── Agent analyzing spinner (no standard result yet) ──────────── */}
+          {isAgentAnalyzing && !analysisResult && (
+            <div className="analysis-result-below">
+              <AgentPanel
+                report={null}
+                isLoading={true}
+                question={currentQuery}
+              />
             </div>
           )}
         </div>

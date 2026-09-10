@@ -28,10 +28,10 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 # ─────────────────────────────────────────────
 # Config
 # ─────────────────────────────────────────────
-DATASET_DIR   = r"C:\Users\IPS\Desktop\dataset"
+DATASET_DIR   = r"C:\Users\Suryansh\OneDrive\Desktop\dataset"
 TRAIN_JSON    = os.path.join(DATASET_DIR, "VRSBench_train.json")
 TRAIN_IMG_DIR = os.path.join(DATASET_DIR, "Images_train", "Images_train")
-OUTPUT_DIR    = r"C:\Users\IPS\Desktop\Satellite\satquery-ai-vqa-lora"
+OUTPUT_DIR    = r"C:\Users\Suryansh\OneDrive\Desktop\satquery-ai-vqa-lora"
 
 MAX_SAMPLES   = 1000    # Surface-level: just 1000 samples
 NUM_EPOCHS    = 1

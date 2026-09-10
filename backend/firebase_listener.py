@@ -1,27 +1,61 @@
 """
-Firebase Realtime Database Listener
-=====================================
-Listens for new VQA queries written by the frontend,
-runs inference, and writes answers back to Firebase.
+Firebase Realtime Database Listener — Extended
+================================================
+Listens for new queries written by the frontend,
+dispatches to the correct pipeline (VQA / Agent / CNN),
+and writes structured results back to Firebase RTDB.
 
 Realtime DB structure:
   /queries/{queryId}/
-    image_url:  str   (Firebase Storage download URL)
-    question:   str
-    status:     "pending" | "processing" | "done" | "error"
-    timestamp:  int   (Unix ms)
+    uid:           str
+    image_base64:  str   (base64 JPEG, no data: prefix)
+    question:      str
+    task:          str   ("vqa" | "caption" | "refer" | "agent" | "cnn")
+    status:        str   ("pending" | "processing" | "done" | "error")
+    timestamp:     int   (Unix ms)
+    source:        str   ("frontend_web")
 
-  /results/{queryId}/
-    answer:     str
-    confidence: float
-    task:       str
-    processed_at: int
+  /results/{queryId}/         ← VQA / caption / refer answers
+    answer:        str
+    confidence:    float
+    bboxes:        list   (optional)
+    bbox_object:   str    (optional)
+    task:          str
+    processed_at:  int
+
+  /agent_results/{queryId}/   ← Full AI Agent structured reports
+    summary:            str
+    object_counts:      dict
+    total_detections:   int
+    bboxes:             list
+    land_cover:         dict
+    land_cover_display: dict
+    dominant_land_cover: str
+    vlm_answer:         str | None
+    confidence:         float
+    tools_used:         list
+    routing_mode:       str
+    duration_ms:        float
+    errors:             list
+    processed_at:       int
+
+  /cnn_results/{queryId}/     ← CNN-only results
+    object_counts:      dict
+    total_detections:   int
+    land_cover:         dict
+    dominant_land_cover: str
+    confidence:         float
+    tasks_run:          list
+    duration_ms:        float
+    processed_at:       int
 """
 
+import asyncio
 import io
 import threading
 import time
 import urllib.request
+import base64
 
 from PIL import Image
 
@@ -29,15 +63,25 @@ from backend.firebase_config import (
     FIREBASE_CONFIG,
     DB_QUERIES_PATH,
     DB_RESULTS_PATH,
+    DB_AGENT_PATH,
+    DB_CNN_PATH,
     init_firebase,
     get_db,
+    is_initialized,
 )
 
 
 class FirebaseListener:
     """
     Background thread that polls Firebase Realtime DB
-    for pending queries and processes them via the model.
+    for pending queries and processes them via the correct pipeline.
+
+    Supported task values:
+      "vqa"     → Qwen2.5-VL VQA  (writes to /results/)
+      "caption" → Qwen2.5-VL caption (writes to /results/)
+      "refer"   → Qwen2.5-VL referring expression (writes to /results/)
+      "agent"   → Full AI Agent pipeline (writes to /agent_results/)
+      "cnn"     → CNN-only pipeline (writes to /cnn_results/)
     """
 
     def __init__(self, model_manager):
@@ -45,6 +89,7 @@ class FirebaseListener:
         self._running = False
         self._thread = None
         self._poll_interval = 2  # seconds between polls
+        self._loop = None        # asyncio event loop for agent pipeline
 
     def start(self):
         """Start the background listener thread."""
@@ -52,10 +97,10 @@ class FirebaseListener:
             return
         self._running = True
         self._thread = threading.Thread(
-            target=self._poll_loop, daemon=True
+            target=self._poll_loop, daemon=True, name="FirebaseListener"
         )
         self._thread.start()
-        print("  Firebase listener started (polling every 2s)")
+        print("  ✅ Firebase listener started (polling every 2s)")
 
     def stop(self):
         """Stop the listener."""
@@ -65,16 +110,21 @@ class FirebaseListener:
         print("  Firebase listener stopped")
 
     def _poll_loop(self):
-        """Main polling loop — checks for pending queries."""
+        """Main polling loop — creates a dedicated asyncio loop for async tools."""
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
         while self._running:
             try:
                 self._process_pending()
             except Exception as e:
                 print(f"  Firebase listener error: {e}")
             time.sleep(self._poll_interval)
+        self._loop.close()
 
     def _process_pending(self):
         """Find and process all pending queries."""
+        if not is_initialized():
+            return
         try:
             ref = get_db().child(DB_QUERIES_PATH)
             all_queries = ref.get()
@@ -86,114 +136,229 @@ class FirebaseListener:
                     continue
                 if query_data.get("status") != "pending":
                     continue
-
                 self._handle_query(query_id, query_data)
 
         except Exception as e:
-            print(f"  DB read error: {e}")
+            err_str = str(e)
+            if "initialize_app()" in err_str:
+                time.sleep(10)
+            else:
+                print(f"  DB read error: {e}")
 
     def _handle_query(self, query_id: str, query_data: dict):
-        """Process a single query."""
-        question  = query_data.get("question", "")
-        image_b64 = query_data.get("image_base64", "")
-        image_url = query_data.get("image_url", "")
-        task      = query_data.get("task", "vqa")
-
-        print(f"  Processing query {query_id}: '{question[:50]}'")
+        """Dispatch to the correct pipeline based on task type."""
+        task = query_data.get("task", "vqa")
+        print(f"  📥 Query {query_id} | task={task} | '{str(query_data.get('question',''))[:50]}'")
 
         # Mark as processing
-        get_db().child(DB_QUERIES_PATH).child(query_id).update(
-            {"status": "processing"}
-        )
+        get_db().child(DB_QUERIES_PATH).child(query_id).update({"status": "processing"})
 
         try:
-            # Load image — prefer base64 (free RTDB), fall back to URL (legacy)
-            if image_b64:
-                image = self._decode_base64_image(image_b64)
-            elif image_url:
-                image = self._download_image(image_url)
-            else:
-                raise ValueError("Query has neither image_base64 nor image_url")
-
-            # Run inference
-            if not self.model_manager.is_loaded:
-                raise RuntimeError("Model not loaded yet")
-
-            bboxes      = []
-            bbox_object = None
-
-            if task == "caption":
-                result     = self.model_manager.generate_caption(image)
-                answer     = result["caption"]
-                confidence = result["confidence"]
-
-            elif task == "refer":
-                expr       = query_data.get("expression", question)
-                result     = self.model_manager.locate_object(image, expr)
-                answer     = str(result["bbox"]) if result["bbox"] else result["raw_output"]
-                confidence = result["confidence"]
-
-            else:  # default: vqa
-                # ── Check if this is an object-counting/detection question ──
-                obj_label = self._detect_object_keyword(question)
-                is_count  = self._is_counting_query(question)
-
-                if is_count and obj_label:
-                    # Step 1: VQA for the CORRECT text answer to the user's question
-                    vqa_result = self.model_manager.answer_vqa(image, question)
-                    answer     = vqa_result["answer"]
-                    confidence = vqa_result["confidence"]
-
-                    # Step 2: Separate detection pass for real bounding boxes
-                    try:
-                        detect_result = self.model_manager.detect_objects(image, obj_label)
-                        bboxes        = detect_result["bboxes"]
-                        bbox_object   = obj_label
-                        print(f"  Detection found {len(bboxes)} {obj_label}(s)")
-                    except Exception as det_err:
-                        print(f"  Detection failed ({det_err}) — visual boxes skipped")
-                        bboxes      = []
-                        bbox_object = None
-                else:
-                    result     = self.model_manager.answer_vqa(image, question)
-                    answer     = result["answer"]
-                    confidence = result["confidence"]
-
-            # Write result to /results/{queryId}
-            result_payload = {
-                "answer":       answer,
-                "confidence":   round(confidence, 3),
-                "task":         task,
-                "processed_at": int(time.time() * 1000),
-            }
-            if bboxes:
-                result_payload["bboxes"]      = bboxes
-                result_payload["bbox_object"] = bbox_object
-
-            get_db().child(DB_RESULTS_PATH).child(query_id).set(result_payload)
-
-            # Mark query as done
-            get_db().child(DB_QUERIES_PATH).child(query_id).update(
-                {"status": "done"}
-            )
-            print(f"  Done {query_id}: '{answer[:60]}' | bboxes: {len(bboxes)}")
-
+            image = self._load_image(query_data)
         except Exception as e:
-            error_msg = str(e)
-            print(f"  Error processing {query_id}: {error_msg}")
-            get_db().child(DB_QUERIES_PATH).child(query_id).update(
-                {"status": "error", "error": error_msg}
+            self._write_error(query_id, task, f"Image load failed: {e}")
+            return
+
+        try:
+            if task == "agent":
+                self._handle_agent(query_id, query_data, image, task)
+            elif task == "cnn":
+                self._handle_cnn(query_id, query_data, image, task)
+            else:
+                self._handle_vlm(query_id, query_data, image, task)
+        except Exception as e:
+            self._write_error(query_id, task, str(e))
+
+    # ─── VLM pipeline ─────────────────────────────────────────────────────────
+
+    def _handle_vlm(self, query_id, query_data, image, task):
+        """Handle VQA / caption / refer tasks via Qwen2.5-VL."""
+        question = query_data.get("question", "")
+
+        if not self.model_manager.is_loaded:
+            raise RuntimeError("Qwen VLM model not loaded yet")
+
+        bboxes = []
+        bbox_object = None
+
+        if task == "caption":
+            result = self.model_manager.generate_caption(image)
+            answer = result["caption"]
+            confidence = result["confidence"]
+
+        elif task == "refer":
+            expr = query_data.get("expression", question)
+            result = self.model_manager.locate_object(image, expr)
+            answer = str(result["bbox"]) if result["bbox"] else result["raw_output"]
+            confidence = result["confidence"]
+
+        else:  # vqa (default)
+            obj_label = self._detect_object_keyword(question)
+            is_count = self._is_counting_query(question)
+            has_cuda = (
+                getattr(self.model_manager, "_device", None) is not None
+                and "cuda" in str(self.model_manager._device)
             )
-            get_db().child(DB_RESULTS_PATH).child(query_id).set({
-                "answer":       f"Error: {error_msg}",
-                "confidence":   0.0,
-                "task":         task,
-                "processed_at": int(time.time() * 1000),
-            })
+            if is_count and obj_label and has_cuda:
+                vqa_result = self.model_manager.answer_vqa(image, question)
+                answer = vqa_result["answer"]
+                confidence = vqa_result["confidence"]
+                try:
+                    detect_result = self.model_manager.detect_objects(image, obj_label)
+                    bboxes = detect_result["bboxes"]
+                    bbox_object = obj_label
+                except Exception as det_err:
+                    print(f"  Detection fallback failed: {det_err}")
+            else:
+                result = self.model_manager.answer_vqa(image, question)
+                answer = result["answer"]
+                confidence = result["confidence"]
+
+        payload = {
+            "answer":       answer,
+            "confidence":   round(confidence, 3),
+            "task":         task,
+            "processed_at": int(time.time() * 1000),
+        }
+        if bboxes:
+            payload["bboxes"] = bboxes
+            payload["bbox_object"] = bbox_object
+
+        get_db().child(DB_RESULTS_PATH).child(query_id).set(payload)
+        get_db().child(DB_QUERIES_PATH).child(query_id).update({"status": "done"})
+        print(f"  ✅ VLM done {query_id}: '{answer[:60]}'")
+
+    # ─── AI Agent pipeline ────────────────────────────────────────────────────
+
+    def _handle_agent(self, query_id, query_data, image, task):
+        """Handle full AI Agent pipeline — writes to /agent_results/."""
+        question = query_data.get("question", "")
+
+        from AI_Agents.agent import sat_agent
+
+        # Run the async agent pipeline in our dedicated event loop
+        report = self._loop.run_until_complete(
+            sat_agent.run(image, question)
+        )
+        rd = report.to_dict()
+
+        # Strip large base64 images before writing to RTDB (keep counts/text/percentages)
+        payload = {
+            "summary":             rd.get("summary", ""),
+            "vlm_answer":          rd.get("vlm_answer"),
+            "caption":             rd.get("caption"),
+            "object_counts":       rd.get("object_counts", {}),
+            "total_detections":    rd.get("total_detections", 0),
+            "bboxes":              rd.get("bboxes", []),
+            "bbox_labels":         rd.get("bbox_labels", []),
+            "bbox_confidences":    rd.get("bbox_confidences", []),
+            "land_cover":          rd.get("land_cover", {}),
+            "land_cover_display":  rd.get("land_cover_display", {}),
+            "dominant_land_cover": rd.get("dominant_land_cover", ""),
+            "confidence":          rd.get("confidence", 0.0),
+            "tools_used":          rd.get("tools_used", []),
+            "routing_mode":        rd.get("routing_mode", ""),
+            "reasoning_trace":     rd.get("reasoning_trace", ""),
+            "errors":              rd.get("errors", []),
+            "duration_ms":         rd.get("duration_ms", 0.0),
+            "question":            question,
+            "processed_at":        int(time.time() * 1000),
+        }
+
+        get_db().child(DB_AGENT_PATH).child(query_id).set(payload)
+        get_db().child(DB_QUERIES_PATH).child(query_id).update({"status": "done"})
+        print(
+            f"  ✅ Agent done {query_id}: "
+            f"conf={rd.get('confidence',0):.2f} | "
+            f"tools={rd.get('tools_used',[])} | "
+            f"{rd.get('duration_ms',0):.0f}ms"
+        )
+
+    # ─── CNN pipeline ─────────────────────────────────────────────────────────
+
+    def _handle_cnn(self, query_id, query_data, image, task):
+        """Handle CNN-only pipeline (detect + segment) — writes to /cnn_results/."""
+        tasks_param = query_data.get("cnn_tasks", ["detect", "segment"])
+        conf_threshold = float(query_data.get("conf_threshold", 0.25))
+
+        from CNN.cnn_pipeline import cnn_pipeline
+
+        result = self._loop.run_until_complete(
+            cnn_pipeline.run(image, tasks=tasks_param, conf_threshold=conf_threshold)
+        )
+        rd = result.to_dict()
+
+        payload = {
+            "object_counts":       rd.get("object_counts", {}),
+            "total_detections":    rd.get("total_detections", 0),
+            "bboxes":              rd.get("bboxes", []),
+            "bbox_labels":         rd.get("bbox_labels", []),
+            "bbox_confidences":    rd.get("bbox_confidences", []),
+            "land_cover_percentages": rd.get("land_cover_percentages", {}),
+            "land_cover_display":  rd.get("land_cover_display", {}),
+            "dominant_land_cover": rd.get("dominant_land_cover", ""),
+            "tasks_run":           rd.get("tasks_run", []),
+            "overall_confidence":  rd.get("overall_confidence", 0.0),
+            "total_duration_ms":   rd.get("total_duration_ms", 0.0),
+            "errors":              rd.get("errors", []),
+            "processed_at":        int(time.time() * 1000),
+        }
+
+        get_db().child(DB_CNN_PATH).child(query_id).set(payload)
+        get_db().child(DB_QUERIES_PATH).child(query_id).update({"status": "done"})
+        print(
+            f"  ✅ CNN done {query_id}: "
+            f"detections={rd.get('total_detections',0)} | "
+            f"{rd.get('total_duration_ms',0):.0f}ms"
+        )
+
+    # ─── Error writer ──────────────────────────────────────────────────────────
+
+    def _write_error(self, query_id: str, task: str, error_msg: str):
+        """Write error to both /queries/ and the appropriate results path."""
+        print(f"  ❌ Error {query_id}: {error_msg}")
+
+        result_path = (
+            DB_AGENT_PATH if task == "agent"
+            else DB_CNN_PATH if task == "cnn"
+            else DB_RESULTS_PATH
+        )
+
+        error_payload = {
+            "answer":       f"Error: {error_msg}",
+            "confidence":   0.0,
+            "task":         task,
+            "processed_at": int(time.time() * 1000),
+            "error":        error_msg,
+        }
+
+        get_db().child(DB_QUERIES_PATH).child(query_id).update(
+            {"status": "error", "error": error_msg}
+        )
+        get_db().child(result_path).child(query_id).set(error_payload)
+
+    # ─── Helpers ───────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _load_image(query_data: dict) -> Image.Image:
+        """Load PIL image from base64 or URL in the query payload."""
+        image_b64 = query_data.get("image_base64", "")
+        image_url = query_data.get("image_url", "")
+
+        if image_b64:
+            raw = base64.b64decode(image_b64)
+            return Image.open(io.BytesIO(raw)).convert("RGB")
+        elif image_url:
+            req = urllib.request.Request(
+                image_url, headers={"User-Agent": "SatQueryAI/1.0"}
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return Image.open(io.BytesIO(resp.read())).convert("RGB")
+        else:
+            raise ValueError("Query has neither image_base64 nor image_url")
 
     @staticmethod
     def _is_counting_query(question: str) -> bool:
-        """Returns True if the question is asking to count or detect objects."""
         q = question.lower()
         return any(kw in q for kw in [
             "how many", "count", "number of", "total", "detect", "find all",
@@ -202,44 +367,18 @@ class FirebaseListener:
 
     @staticmethod
     def _detect_object_keyword(question: str) -> str | None:
-        """
-        Returns the primary object label if the question mentions a known
-        detectable object type, else None.
-        """
         q = question.lower()
         OBJECT_MAP = [
-            (["airplane", "aircraft", "plane", "planes", "airplanes", "jet", "helicopter"], "airplane"),
-            (["car", "cars", "vehicle", "vehicles", "automobile"],                          "car"),
-            (["ship", "ships", "vessel", "vessels", "boat", "boats"],                       "ship"),
-            (["building", "buildings", "structure", "structures", "house"],                 "building"),
-            (["truck", "trucks"],                                                            "truck"),
-            (["tank", "tanks", "storage tank"],                                             "storage tank"),
-            (["bridge", "bridges"],                                                         "bridge"),
-            (["person", "people", "pedestrian", "human"],                                   "person"),
+            (["airplane", "aircraft", "plane", "planes", "airplanes", "aeroplane", "aeroplanes", "jet", "helicopter"], "airplane"),
+            (["car", "cars", "vehicle", "vehicles", "automobile"], "car"),
+            (["ship", "ships", "vessel", "vessels", "boat", "boats"], "ship"),
+            (["building", "buildings", "structure", "structures", "house"], "building"),
+            (["truck", "trucks"], "truck"),
+            (["tank", "tanks", "storage tank"], "storage tank"),
+            (["bridge", "bridges"], "bridge"),
+            (["person", "people", "pedestrian", "human"], "person"),
         ]
         for keywords, label in OBJECT_MAP:
             if any(kw in q for kw in keywords):
                 return label
         return None
-
-    @staticmethod
-    def _decode_base64_image(b64: str) -> Image.Image:
-        """Decode a plain base64 string (no data: prefix) into a PIL Image."""
-        import base64
-        try:
-            raw = base64.b64decode(b64)
-            return Image.open(io.BytesIO(raw)).convert("RGB")
-        except Exception as e:
-            raise ValueError(f"Failed to decode base64 image: {e}")
-
-    @staticmethod
-    def _download_image(url: str) -> Image.Image:
-        """Download image from URL (Firebase Storage download URL)."""
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": "SatQueryAI/1.0"},
-        )
-        with urllib.request.urlopen(req, timeout=30) as response:
-            img_bytes = response.read()
-        return Image.open(io.BytesIO(img_bytes)).convert("RGB")
-

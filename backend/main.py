@@ -30,15 +30,45 @@ Usage:
 """
 
 import base64
+import importlib
 import io
+import sys
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from PIL import Image
+
+# ─ Ensure top-level packages ("AI Agents", "CNN") are importable ────────
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+# Alias "AI Agents" → AI_Agents so Python can import it
+if "AI_Agents" not in sys.modules:
+    import importlib.util
+    _spec = importlib.util.spec_from_file_location(
+        "AI_Agents",
+        _ROOT / "AI Agents" / "__init__.py",
+        submodule_search_locations=[str(_ROOT / "AI Agents")],
+    )
+    if _spec:
+        _mod = importlib.util.module_from_spec(_spec)
+        sys.modules["AI_Agents"] = _mod
+        # Register all sub-modules so relative imports work
+        for _sub in ["router", "planner", "tools", "executor", "verifier", "merger", "agent"]:
+            _sspec = importlib.util.spec_from_file_location(
+                f"AI_Agents.{_sub}",
+                _ROOT / "AI Agents" / f"{_sub}.py",
+            )
+            if _sspec:
+                _smod = importlib.util.module_from_spec(_sspec)
+                sys.modules[f"AI_Agents.{_sub}"] = _smod
+        _spec.loader.exec_module(_mod)
 
 from backend.config import API_HOST, API_PORT, CORS_ORIGINS, MAX_IMAGE_SIZE_MB
 from backend.schemas import (
@@ -48,6 +78,12 @@ from backend.schemas import (
     ReferringRequest, ReferringResponse,
     StatsResponse,
     VQARequest, VQAResponse,
+    # CNN
+    CNNDetectRequest, CNNDetectResponse,
+    CNNSegmentRequest, CNNSegmentResponse,
+    CNNFullRequest, CNNFullResponse,
+    # Agent
+    AgentAnalyzeRequest, AgentAnalyzeResponse, AgentStatusResponse,
 )
 from backend.model import model_manager
 from backend.firebase_config import init_firebase, FIREBASE_CONFIG
@@ -95,7 +131,7 @@ async def lifespan(app: FastAPI):
 
     print("\n" + "=" * 60)
     print("  Server ready at http://localhost:8000")
-    print("  Swagger UI  → http://localhost:8000/docs")
+    print("  Swagger UI  -> http://localhost:8000/docs")
     print("=" * 60 + "\n")
 
     yield
@@ -359,6 +395,224 @@ async def firebase_result(query_id: str):
         task=data.get("task", "vqa"),
         processed_at=data.get("processed_at"),
     )
+
+
+# ─────────────────────────────────────────────
+# CNN Endpoints
+# ─────────────────────────────────────────────
+@app.post("/api/cnn/detect", response_model=CNNDetectResponse, tags=["CNN"])
+async def cnn_detect_endpoint(req: CNNDetectRequest):
+    """
+    **YOLOv8 Object Detection** — instant counting + square bounding boxes.
+
+    Returns detected objects with normalized bboxes [x1,y1,x2,y2] and
+    an annotated image (base64 PNG) with square boxes drawn around each object.
+    """
+    if not req.image_base64:
+        raise HTTPException(400, "image_base64 is required")
+    image = _decode_b64_image(req.image_base64)
+    from CNN.yolo_detector import yolo_detector
+    det = yolo_detector.detect(image, conf_threshold=req.conf_threshold)
+    if det.error:
+        raise HTTPException(500, f"YOLO detection failed: {det.error}")
+    # Filter by target classes if requested
+    detections = det.detections
+    counts = det.object_counts
+    if req.target_classes:
+        tc = [c.lower() for c in req.target_classes]
+        detections = [d for d in detections if d.label.lower() in tc]
+        counts = {k: v for k, v in counts.items() if k.lower() in tc}
+    return CNNDetectResponse(
+        object_counts=counts,
+        total_detections=len(detections),
+        bboxes=[d.bbox_norm for d in detections],
+        bbox_labels=[d.label for d in detections],
+        bbox_confidences=[d.confidence for d in detections],
+        annotated_image_b64=det.annotated_image_b64,
+        confidence=det.confidence,
+        duration_ms=det.duration_ms,
+    )
+
+
+@app.post("/api/cnn/detect/upload", response_model=CNNDetectResponse, tags=["CNN"])
+async def cnn_detect_upload(
+    file: UploadFile = File(..., description="Image file (PNG/JPEG)"),
+    conf_threshold: float = Form(0.25),
+    target_classes: Optional[str] = Form(None, description="Comma-separated class names"),
+):
+    """YOLOv8 Object Detection — multipart file upload."""
+    image = await _read_upload(file)
+    from CNN.yolo_detector import yolo_detector
+    det = yolo_detector.detect(image, conf_threshold=conf_threshold)
+    if det.error:
+        raise HTTPException(500, f"YOLO detection failed: {det.error}")
+    tc = [c.strip().lower() for c in target_classes.split(",")] if target_classes else []
+    detections = [d for d in det.detections if not tc or d.label.lower() in tc]
+    counts = {k: v for k, v in det.object_counts.items() if not tc or k.lower() in tc}
+    return CNNDetectResponse(
+        object_counts=counts,
+        total_detections=len(detections),
+        bboxes=[d.bbox_norm for d in detections],
+        bbox_labels=[d.label for d in detections],
+        bbox_confidences=[d.confidence for d in detections],
+        annotated_image_b64=det.annotated_image_b64,
+        confidence=det.confidence,
+        duration_ms=det.duration_ms,
+    )
+
+
+@app.post("/api/cnn/segment", response_model=CNNSegmentResponse, tags=["CNN"])
+async def cnn_segment_endpoint(req: CNNSegmentRequest):
+    """
+    **ResNet/FCN Land Cover Segmentation** — pixel-level surface density.
+
+    Returns exact percentages for:
+    - Vegetation / Forest Canopy
+    - Water Bodies / Rivers
+    - Urban / Built-up Structures
+    - Agricultural Fields
+    """
+    if not req.image_base64:
+        raise HTTPException(400, "image_base64 is required")
+    image = _decode_b64_image(req.image_base64)
+    from CNN.segmentation import land_cover_segmenter
+    seg = land_cover_segmenter.segment(image)
+    if seg.error:
+        raise HTTPException(500, f"Segmentation failed: {seg.error}")
+    from CNN.segmentation import CLASS_DISPLAY_NAMES
+    return CNNSegmentResponse(
+        land_cover_percentages=seg.percentages,
+        land_cover_display={CLASS_DISPLAY_NAMES.get(k, k): v for k, v in seg.percentages.items()},
+        dominant_land_cover=seg.dominant_class,
+        mask_image_b64=seg.mask_image_b64,
+        confidence=seg.confidence,
+        duration_ms=seg.duration_ms,
+    )
+
+
+@app.post("/api/cnn/segment/upload", response_model=CNNSegmentResponse, tags=["CNN"])
+async def cnn_segment_upload(file: UploadFile = File(..., description="Image file (PNG/JPEG)")):
+    """ResNet/FCN Land Cover Segmentation — multipart file upload."""
+    image = await _read_upload(file)
+    from CNN.segmentation import land_cover_segmenter, CLASS_DISPLAY_NAMES
+    seg = land_cover_segmenter.segment(image)
+    if seg.error:
+        raise HTTPException(500, f"Segmentation failed: {seg.error}")
+    return CNNSegmentResponse(
+        land_cover_percentages=seg.percentages,
+        land_cover_display={CLASS_DISPLAY_NAMES.get(k, k): v for k, v in seg.percentages.items()},
+        dominant_land_cover=seg.dominant_class,
+        mask_image_b64=seg.mask_image_b64,
+        confidence=seg.confidence,
+        duration_ms=seg.duration_ms,
+    )
+
+
+@app.post("/api/cnn/full", response_model=CNNFullResponse, tags=["CNN"])
+async def cnn_full_endpoint(req: CNNFullRequest):
+    """
+    **Full CNN Pipeline** — detection + segmentation in parallel.
+
+    Runs YOLOv8 detection and ResNet/FCN segmentation concurrently.
+    """
+    if not req.image_base64:
+        raise HTTPException(400, "image_base64 is required")
+    image = _decode_b64_image(req.image_base64)
+    from CNN.cnn_pipeline import cnn_pipeline
+    result = await cnn_pipeline.run(image, tasks=req.tasks, conf_threshold=req.conf_threshold)
+    return CNNFullResponse(**result.to_dict())
+
+
+@app.post("/api/cnn/full/upload", response_model=CNNFullResponse, tags=["CNN"])
+async def cnn_full_upload(
+    file: UploadFile = File(...),
+    tasks: str = Form("detect,segment"),
+    conf_threshold: float = Form(0.25),
+):
+    """Full CNN Pipeline — multipart file upload."""
+    image = await _read_upload(file)
+    from CNN.cnn_pipeline import cnn_pipeline
+    task_list = [t.strip() for t in tasks.split(",")]
+    result = await cnn_pipeline.run(image, tasks=task_list, conf_threshold=conf_threshold)
+    return CNNFullResponse(**result.to_dict())
+
+
+# ─────────────────────────────────────────────
+# AI Agent Endpoints
+# ─────────────────────────────────────────────
+@app.get("/api/agent/status", response_model=AgentStatusResponse, tags=["AI Agent"])
+async def agent_status():
+    """
+    Check which AI agent components are ready.
+
+    - `cnn_detect_ready`: YOLOv8 model is loaded
+    - `cnn_segment_ready`: Segmentation model is loaded
+    - `vlm_ready`: Qwen2.5-VL model is loaded
+    """
+    vlm_ready = model_manager.is_loaded
+    # CNN models lazy-load on first call; we check if ultralytics is importable
+    try:
+        import ultralytics  # noqa: F401
+        cnn_detect_ready = True
+    except ImportError:
+        cnn_detect_ready = False
+    try:
+        import torchvision  # noqa: F401
+        cnn_segment_ready = True
+    except ImportError:
+        cnn_segment_ready = False
+
+    all_ready = vlm_ready and cnn_detect_ready and cnn_segment_ready
+    return AgentStatusResponse(
+        agent_ready=all_ready,
+        cnn_detect_ready=cnn_detect_ready,
+        cnn_segment_ready=cnn_segment_ready,
+        vlm_ready=vlm_ready,
+        message=(
+            "All components ready." if all_ready
+            else "Some components not yet loaded (see individual flags)."
+        ),
+    )
+
+
+@app.post("/api/agent/analyze", response_model=AgentAnalyzeResponse, tags=["AI Agent"])
+async def agent_analyze(req: AgentAnalyzeRequest):
+    """
+    **Full AI Agent Pipeline** — intelligent multi-tool satellite image analysis.
+
+    The agent:
+    1. **Routes** the query (fast CNN vs heavy VLM vs Hybrid)
+    2. **Plans** execution steps from complex compound questions
+    3. **Executes** independent steps in parallel (asyncio.gather)
+    4. **Verifies** low-confidence results by triggering re-analysis
+    5. **Merges** numeric stats, bboxes, land-cover %, and NL into one report
+
+    Returns a StructuredReport with all analysis results.
+    """
+    if not req.image_base64:
+        raise HTTPException(400, "image_base64 is required")
+    image = _decode_b64_image(req.image_base64)
+
+    from AI_Agents.agent import sat_agent
+    report = await sat_agent.run(image, req.question, req.conf_threshold)
+    return AgentAnalyzeResponse(**report.to_dict())
+
+
+@app.post("/api/agent/analyze/upload", response_model=AgentAnalyzeResponse, tags=["AI Agent"])
+async def agent_analyze_upload(
+    file: UploadFile = File(..., description="Satellite/aerial image (PNG/JPEG)"),
+    question: str = Form(..., description="Your question about the image"),
+    conf_threshold: float = Form(0.25, description="YOLO detection confidence threshold"),
+):
+    """
+    **Full AI Agent Pipeline** — multipart file upload version.
+
+    Same as `/api/agent/analyze` but accepts a file upload instead of base64.
+    """
+    image = await _read_upload(file)
+    from AI_Agents.agent import sat_agent
+    report = await sat_agent.run(image, question, conf_threshold)
+    return AgentAnalyzeResponse(**report.to_dict())
 
 
 # ─────────────────────────────────────────────

@@ -2,7 +2,7 @@
 SatQuery AI — Pydantic Schemas
 ================================
 """
-from typing import Optional
+from typing import Optional, Any
 from pydantic import BaseModel, Field
 
 
@@ -96,3 +96,97 @@ class StatsResponse(BaseModel):
     model_loaded: bool
     firebase_connected: bool
     uptime_seconds: float
+
+
+# ─── CNN Detection ────────────────────────────
+class CNNDetectRequest(BaseModel):
+    image_base64: Optional[str] = Field(None, description="Base64-encoded image (PNG/JPEG)")
+    conf_threshold: float = Field(0.25, ge=0.0, le=1.0, description="Minimum detection confidence")
+    target_classes: Optional[list[str]] = Field(None, description="Object classes to filter (e.g. ['vehicle', 'aircraft'])")
+
+class CNNDetectResponse(BaseModel):
+    object_counts: dict[str, int]
+    total_detections: int
+    bboxes: list[list[float]]
+    bbox_labels: list[str]
+    bbox_confidences: list[float]
+    annotated_image_b64: Optional[str] = None
+    confidence: float
+    duration_ms: float
+    model_used: str = "yolov8n"
+    errors: list[str] = []
+
+
+# ─── CNN Segmentation ─────────────────────────
+class CNNSegmentRequest(BaseModel):
+    image_base64: Optional[str] = Field(None, description="Base64-encoded image (PNG/JPEG)")
+
+class CNNSegmentResponse(BaseModel):
+    land_cover_percentages: dict[str, float]
+    land_cover_display: dict[str, float]
+    dominant_land_cover: str
+    mask_image_b64: Optional[str] = None
+    confidence: float
+    duration_ms: float
+    model_used: str = "resnet50-fcn-landcover"
+    error: Optional[str] = None
+
+
+# ─── CNN Full Pipeline ─────────────────────────
+class CNNFullRequest(BaseModel):
+    image_base64: Optional[str] = Field(None, description="Base64-encoded image (PNG/JPEG)")
+    tasks: list[str] = Field(["detect", "segment"], description="Tasks to run: detect | segment")
+    conf_threshold: float = Field(0.25, ge=0.0, le=1.0)
+
+class CNNFullResponse(BaseModel):
+    object_counts: dict[str, int]
+    total_detections: int
+    bboxes: list[list[float]]
+    bbox_labels: list[str]
+    bbox_confidences: list[float]
+    annotated_image_b64: Optional[str] = None
+    land_cover_percentages: dict[str, float]
+    land_cover_display: dict[str, float]
+    dominant_land_cover: str
+    mask_image_b64: Optional[str] = None
+    tasks_run: list[str]
+    overall_confidence: float
+    total_duration_ms: float
+    errors: list[str] = []
+
+
+# ─── AI Agent ─────────────────────────────────
+class AgentAnalyzeRequest(BaseModel):
+    image_base64: Optional[str] = Field(None, description="Base64-encoded image (PNG/JPEG)")
+    question: str = Field(..., description="User's question about the image")
+    conf_threshold: float = Field(0.25, ge=0.0, le=1.0, description="YOLO confidence threshold")
+
+class AgentAnalyzeResponse(BaseModel):
+    summary: str
+    vlm_answer: Optional[str] = None
+    caption: Optional[str] = None
+    object_counts: dict[str, int]
+    total_detections: int
+    bboxes: list[list[float]]
+    bbox_labels: list[str]
+    bbox_confidences: list[float]
+    annotated_image_b64: Optional[str] = None
+    land_cover: dict[str, float]
+    land_cover_display: dict[str, float]
+    dominant_land_cover: str
+    mask_image_b64: Optional[str] = None
+    confidence: float
+    tools_used: list[str]
+    routing_mode: str
+    execution_steps: list[dict[str, Any]]
+    verification_log: list[dict[str, Any]]
+    reasoning_trace: str
+    errors: list[str]
+    duration_ms: float
+
+class AgentStatusResponse(BaseModel):
+    agent_ready: bool
+    cnn_detect_ready: bool
+    cnn_segment_ready: bool
+    vlm_ready: bool
+    message: str

@@ -53,7 +53,7 @@ class SatQueryModel:
     # ─────────────────────────────────────────────
     @property
     def is_loaded(self) -> bool:
-        return self._model is not None or self._stub_mode
+        return (self._model is not None and self._processor is not None) or self._stub_mode
 
     @property
     def stats(self) -> dict:
@@ -91,7 +91,10 @@ class SatQueryModel:
             LOAD_IN_4BIT,
         )
 
+        model_path, is_local = self._resolve_model_path(BASE_MODEL_NAME)
         print(f"  Base model : {BASE_MODEL_NAME}")
+        if is_local:
+            print(f"  Local snapshot : {model_path}")
         print(f"  Quantize   : {'4-bit NF4' if LOAD_IN_4BIT else 'FP16'}")
 
         # Quantization config
@@ -106,11 +109,12 @@ class SatQueryModel:
 
         # Load base model
         base_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            BASE_MODEL_NAME,
+            model_path,
             quantization_config=quant_config,
             device_map="auto" if torch.cuda.is_available() else "cpu",
             torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
             trust_remote_code=True,
+            local_files_only=is_local,
         )
 
         # Try loading LoRA adapter
@@ -130,14 +134,47 @@ class SatQueryModel:
             self._model = base_model
 
         self._model.eval()
-        self._processor = AutoProcessor.from_pretrained(
-            BASE_MODEL_NAME, trust_remote_code=True
-        )
+        try:
+            self._processor = AutoProcessor.from_pretrained(
+                model_path, trust_remote_code=True, local_files_only=is_local
+            )
+        except Exception:
+            self._processor = AutoProcessor.from_pretrained(
+                BASE_MODEL_NAME, trust_remote_code=True
+            )
         self._device = next(self._model.parameters()).device
 
         vram = torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else 0
         print(f"  Device     : {self._device}")
         print(f"  VRAM used  : {vram:.1f} GB")
+
+    @staticmethod
+    def _resolve_model_path(base_model_name: str) -> tuple[str, bool]:
+        """Resolve base model path. If a cached snapshot exists in HF_HOME,
+        returns (snapshot_path, True). Otherwise returns (base_model_name, False).
+        Using snapshot directory directly bypasses Windows / OneDrive PermissionError
+        on refs/main and prevents unnecessary HF Hub network requests.
+        """
+        if os.path.isdir(base_model_name):
+            return base_model_name, True
+
+        hf_home = os.environ.get("HF_HOME") or os.path.expanduser(r"~\.cache\huggingface")
+        hub_dir = os.path.join(hf_home, "hub")
+        clean_name = f"models--{base_model_name.replace('/', '--')}"
+        snapshots_dir = os.path.join(hub_dir, clean_name, "snapshots")
+        if os.path.isdir(snapshots_dir):
+            try:
+                snapshots = [
+                    os.path.join(snapshots_dir, s)
+                    for s in os.listdir(snapshots_dir)
+                    if os.path.isdir(os.path.join(snapshots_dir, s))
+                ]
+                if snapshots:
+                    snapshots.sort(key=os.path.getmtime, reverse=True)
+                    return snapshots[0], True
+            except Exception:
+                pass
+        return base_model_name, False
 
     @staticmethod
     def _find_adapter(local_path: str, hf_repo: str) -> Optional[str]:
@@ -195,7 +232,7 @@ class SatQueryModel:
             f"BBOX: [700, 150, 850, 280]\n"
             f"Now detect all {object_label}s and list every BBOX:"
         )
-        raw_output, confidence = self._generate(image, prompt, "refer")
+        raw_output, confidence = self._generate(image, prompt, "refer", max_new_tokens=96)
         bboxes = self._parse_plain_bboxes(raw_output)
 
         # Also try Qwen native grounding format if plain text parsing failed
@@ -288,7 +325,7 @@ class SatQueryModel:
     # Core generation
     # ─────────────────────────────────────────────
     def _generate(
-        self, image: Image.Image, text: str, task: str
+        self, image: Image.Image, text: str, task: str, max_new_tokens: Optional[int] = None
     ) -> tuple[str, float]:
         from backend.config import (
             RS_SYSTEM_PROMPT,
@@ -299,7 +336,7 @@ class SatQueryModel:
             DO_SAMPLE,
         )
 
-        max_tokens = {
+        max_tokens = max_new_tokens or {
             "vqa":     MAX_NEW_TOKENS_VQA,
             "caption": MAX_NEW_TOKENS_CAPTION,
             "refer":   MAX_NEW_TOKENS_REFER,

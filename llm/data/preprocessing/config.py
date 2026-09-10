@@ -9,7 +9,7 @@ import os
 # ─────────────────────────────────────────────
 # Paths
 # ─────────────────────────────────────────────
-DATASET_DIR = r"C:\Users\IPS\Desktop\dataset"
+DATASET_DIR = r"C:\Users\Suryansh\OneDrive\Desktop\dataset"
 
 # Images_train has a double-nested structure from the zip extraction
 IMAGES_TRAIN_DIR = os.path.join(DATASET_DIR, "Images_train", "Images_train")

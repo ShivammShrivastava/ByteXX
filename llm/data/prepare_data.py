@@ -8,7 +8,7 @@ Run this locally (CPU only, no GPU needed) to:
   4. Verify all referenced images exist on disk
 
 Usage:
-    python data/prepare_data.py --dataset-dir "C:/Users/IPS/Desktop/dataset"
+    python data/prepare_data.py --dataset-dir "C:/Users/Suryansh/OneDrive/Desktop/dataset"
 """
 
 import json
@@ -26,7 +26,7 @@ if sys.platform == "win32":
 # ─────────────────────────────────────────────
 # Configuration
 # ─────────────────────────────────────────────
-DEFAULT_DATASET_DIR = r"C:\Users\IPS\Desktop\dataset"
+DEFAULT_DATASET_DIR = r"C:\Users\Suryansh\OneDrive\Desktop\dataset"
 
 TASK_TAGS = {
     "vqa": "[vqa]",

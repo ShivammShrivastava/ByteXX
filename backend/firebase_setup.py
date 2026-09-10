@@ -20,22 +20,25 @@ import time
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-# ── Check service account key exists ──
-KEY_PATH = os.path.join(os.path.dirname(__file__), "serviceAccountKey.json")
-if not os.path.exists(KEY_PATH):
+# ── Locate service account key (try new name, then legacy) ─────────────────────
+_BACKEND_DIR = os.path.dirname(__file__)
+_SA_CANDIDATES = [
+    os.path.join(_BACKEND_DIR, "satellite-efa0a-firebase-adminsdk-fbsvc-075fca07b4.json"),
+    os.path.join(_BACKEND_DIR, "serviceAccountKey.json"),
+]
+KEY_PATH = next((p for p in _SA_CANDIDATES if os.path.exists(p)), None)
+
+if not KEY_PATH:
     print("=" * 60)
     print("  SETUP REQUIRED: Service Account Key Missing")
     print("=" * 60)
     print()
-    print("  1. Go to: https://console.firebase.google.com")
-    print("  2. Select project: satellite-efa0a")
-    print("  3. Click the gear icon → Project Settings")
-    print("  4. Go to 'Service Accounts' tab")
-    print("  5. Click 'Generate new private key'")
-    print("  6. Save the downloaded JSON as:")
-    print(f"     {KEY_PATH}")
+    print("  Expected one of:")
+    for p in _SA_CANDIDATES:
+        print(f"    {p}")
     print()
-    print("  Then re-run this script.")
+    print("  Download from Firebase Console → Project Settings → Service Accounts")
+    print("  → Generate new private key → save to backend/ folder")
     sys.exit(1)
 
 # ── Initialize Firebase ──
@@ -65,47 +68,64 @@ ref.child("_health_check").set({
 val = ref.child("_health_check").get()
 print(f"  OK - DB write/read successful: {val}")
 
-# ── Initialize DB schema ──
+# ── Initialize DB schema (all paths used by backend) ─────────────────────────
 print("\n[3/4] Initializing database schema...")
 ref.child("_schema").set({
-    "version": "1.0",
-    "description": "SatQuery AI - VQA Firebase Schema",
-    "queries_path": "/queries/{queryId}",
-    "results_path": "/results/{queryId}",
+    "version":      "2.0",
+    "description":  "ByteX SatQuery AI — Full Schema (VQA + Agent + CNN)",
+    "project":      "satellite-efa0a",
+    "app_id":       "1:504899672780:web:4f61a1b212930752cdc069",
+    "paths": {
+        "queries":        "/queries/{queryId}     — all incoming jobs (status: pending→processing→done|error)",
+        "results":        "/results/{queryId}     — VQA / caption / refer answers from Qwen2.5-VL",
+        "agent_results":  "/agent_results/{queryId} — full AI Agent structured reports",
+        "cnn_results":    "/cnn_results/{queryId}   — CNN detection + segmentation results",
+        "users":          "/users/{uid}/profile    — user profile",
+        "users_recents":  "/users/{uid}/recents/{id} — query history per user",
+    },
+    "task_types": {
+        "vqa":     "Qwen2.5-VL Visual Question Answering → /results/",
+        "caption": "Qwen2.5-VL Image Captioning        → /results/",
+        "refer":   "Qwen2.5-VL Referring Expression    → /results/",
+        "agent":   "AI Agent (Route+Plan+Execute+Verify+Merge) → /agent_results/",
+        "cnn":     "YOLOv8 + ResNet/FCN CNN pipeline   → /cnn_results/",
+    },
     "last_updated": int(time.time() * 1000),
 })
-print("  OK - Schema initialized")
 
-# ── Test Storage ──
+# Initialize placeholder nodes so the paths appear in the Firebase console
+for path in ["queries", "results", "agent_results", "cnn_results", "users"]:
+    existing = ref.child(path).get()
+    if not existing:
+        ref.child(path).child("_placeholder").set({"initialized": True})
+        ref.child(path).child("_placeholder").delete()
+
+print("  ✅ Schema initialized (v2.0)")
+
+# ── Test Storage ───────────────────────────────────────────────────────────────
 print("\n[4/4] Testing Firebase Storage connection...")
 try:
     bucket = storage.bucket()
-    print(f"  OK - Storage bucket: {bucket.name}")
+    print(f"  ✅ Storage bucket: {bucket.name}")
 except Exception as e:
-    print(f"  Warning: Storage test failed: {e}")
+    print(f"  ⚠  Storage test skipped: {e}")
 
-# ── Done ──
+# ── Done ───────────────────────────────────────────────────────────────────────
 print()
 print("=" * 60)
-print("  SETUP COMPLETE")
+print("  SETUP COMPLETE — satellite-efa0a")
 print("=" * 60)
 print()
-print("  Realtime DB URL:  https://satellite-efa0a-default-rtdb.firebaseio.com")
-print("  Storage Bucket:   satellite-efa0a.firebasestorage.app")
+print("  RTDB URL:  https://satellite-efa0a-default-rtdb.firebaseio.com")
+print("  Storage:   satellite-efa0a.firebasestorage.app")
+print("  App ID:    1:504899672780:web:4f61a1b212930752cdc069")
 print()
-print("  Database structure:")
-print("  /queries/{queryId}")
-print("    image_url  : string  (Storage download URL)")
-print("    question   : string  (user's question)")
-print("    task       : string  (vqa | caption | refer)")
-print("    status     : string  (pending | processing | done | error)")
-print("    timestamp  : number  (Unix ms)")
+print("  Database paths:")
+print("    /queries/{id}        — incoming jobs")
+print("    /results/{id}        — VQA / caption / refer answers")
+print("    /agent_results/{id}  — AI Agent full reports")
+print("    /cnn_results/{id}    — CNN detection + segmentation")
+print("    /users/{uid}/        — user profiles + history")
 print()
-print("  /results/{queryId}")
-print("    answer     : string  (model's answer)")
-print("    confidence : number  (0.0 - 1.0)")
-print("    task       : string")
-print("    processed_at: number (Unix ms)")
-print()
-print("  Start backend with:")
+print("  Start backend:")
 print("    uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload")
