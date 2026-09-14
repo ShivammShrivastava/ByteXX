@@ -227,7 +227,7 @@ class SatQueryModel:
                 f"Give a clear, direct answer in 2-4 sentences. "
                 f"Include the count/number if asked, describe what you see, and note the location."
             )
-            max_tok = 128
+            max_tok = 48   # cap on CPU — most answers need < 20 tokens; cuts gen time ~halved
 
         answer, confidence = self._generate(image, prompt, "vqa", max_new_tokens=max_tok)
         self._stats["queries"] += 1
@@ -393,12 +393,19 @@ class SatQueryModel:
             return_tensors="pt",
         ).to(self._device)
 
+        on_cpu = self._device is None or "cpu" in str(self._device)
+
         with torch.no_grad():
             gen_kwargs = dict(
                 max_new_tokens=max_tokens,
                 do_sample=DO_SAMPLE,
-                return_dict_in_generate=True,
-                output_scores=True,
+                # On CPU, output_scores=True forces a per-token softmax over the full
+                # vocabulary (32k–150k entries) for every generated token — this alone
+                # can take several minutes and blocks the response from being written
+                # back to Firebase.  Skip score collection on CPU and use a fixed
+                # placeholder confidence instead; GPU keeps the full calculation.
+                return_dict_in_generate=not on_cpu,
+                output_scores=not on_cpu,
                 repetition_penalty=1.05,   # prevent looping in long research answers
             )
             # temperature is only valid when sampling; greedy decoding ignores it
@@ -407,12 +414,18 @@ class SatQueryModel:
 
             outputs = self._model.generate(**inputs, **gen_kwargs)
 
-        generated_ids = outputs.sequences[:, inputs["input_ids"].shape[1]:]
+        if on_cpu:
+            # CPU: outputs is a plain tensor (no GenerateDecoderOnlyOutput wrapper)
+            generated_ids = outputs[:, inputs["input_ids"].shape[1]:]
+            confidence = 0.75  # fixed placeholder — avoids vocab-wide softmax on CPU
+        else:
+            generated_ids = outputs.sequences[:, inputs["input_ids"].shape[1]:]
+            confidence = self._compute_confidence(outputs.scores, generated_ids[0])
+
         answer = self._processor.batch_decode(
             generated_ids, skip_special_tokens=True
         )[0].strip()
 
-        confidence = self._compute_confidence(outputs.scores, generated_ids[0])
         return answer, confidence
 
     # ─────────────────────────────────────────────

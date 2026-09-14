@@ -84,14 +84,22 @@ class FirebaseListener:
       "cnn"     -> CNN-only pipeline (writes to /cnn_results/)
     """
 
+    # Maximum age (seconds) for a pending query before it is considered stale.
+    # Queries older than this were likely submitted before the backend started
+    # and would just block fresh requests.
+    _STALE_AFTER_S = 1800  # 30 minutes — relaxed so minor restarts don't expire valid queries
+
     def __init__(self, model_manager):
         self.model_manager = model_manager
         self._running = False
         self._thread = None
         self._poll_interval = 2        # seconds between polls
-        self._loop = None              # asyncio event loop for agent pipeline
         self._auth_error_count = 0     # track consecutive JWT failures
         self._last_auth_error = ""     # avoid repeated identical prints
+        self._in_flight = set()        # query IDs currently being processed
+        # CPU can only run one model at a time — enforce serial inference.
+        # Set to Semaphore(2) if you have GPU and want mild concurrency.
+        self._inference_sem = threading.Semaphore(1)
 
     def start(self):
         """Start the background listener thread."""
@@ -143,7 +151,12 @@ class FirebaseListener:
         self._loop.close()
 
     def _process_pending(self):
-        """Find and process all pending queries."""
+        """Find pending queries, drop stale ones, dispatch fresh ones newest-first.
+
+        Also recovers orphaned queries that are stuck in 'processing' with no
+        recent heartbeat (> 4 min without an update) — these are left over from
+        backend restarts and would block the queue forever otherwise.
+        """
         if not is_initialized():
             return
         try:
@@ -152,32 +165,117 @@ class FirebaseListener:
             if not all_queries:
                 return
 
+            now_ms = int(time.time() * 1000)
+            stale_cutoff_ms = now_ms - self._STALE_AFTER_S * 1000
+            # Queries stuck in 'processing' without a heartbeat for > 4 min are orphaned
+            orphan_cutoff_ms = now_ms - 240_000  # 4 minutes
+
+            # ── Pass 1: recover orphaned 'processing' queries ──────────────────
+            for query_id, query_data in all_queries.items():
+                if not isinstance(query_data, dict):
+                    continue
+                if query_data.get("status") != "processing":
+                    continue
+                if query_id in self._in_flight:
+                    # We own it — heartbeat keeps it alive, not orphaned
+                    continue
+
+                ts = query_data.get("timestamp", now_ms)
+                last_hb_s = query_data.get("heartbeat")  # elapsed seconds, written every 30s
+
+                # Estimate last activity time
+                if last_hb_s is not None:
+                    # heartbeat is elapsed seconds since dispatch; reconstruct last-active ms
+                    last_active_ms = ts + int(last_hb_s) * 1000
+                else:
+                    last_active_ms = ts
+
+                if last_active_ms < orphan_cutoff_ms:
+                    print(
+                        f"  [RECOVER] Orphaned query {query_id} (last_active={(now_ms - last_active_ms)//1000}s ago)"
+                        " — marking error"
+                    )
+                    try:
+                        get_db().child(DB_QUERIES_PATH).child(query_id).update({
+                            "status": "error",
+                            "error": "Query was abandoned mid-processing (backend restarted). Please resubmit.",
+                        })
+                    except Exception:
+                        pass
+
+            # ── Pass 2: collect genuine pending entries ────────────────────────
+            pending = []
             for query_id, query_data in all_queries.items():
                 if not isinstance(query_data, dict):
                     continue
                 if query_data.get("status") != "pending":
                     continue
-                self._handle_query(query_id, query_data)
+                if query_id in self._in_flight:
+                    continue
+
+                ts = query_data.get("timestamp", now_ms)
+                if ts < stale_cutoff_ms:
+                    # Too old — mark as error so it doesn't block the queue
+                    print(f"  [SKIP] Stale query {query_id} (age={(now_ms-ts)//1000}s) — marking error")
+                    try:
+                        get_db().child(DB_QUERIES_PATH).child(query_id).update(
+                            {"status": "error", "error": "Query expired while backend was busy"}
+                        )
+                    except Exception:
+                        pass
+                    continue
+
+                pending.append((ts, query_id, query_data))
+
+            # Process newest queries first so fresh requests don't wait behind old ones
+            pending.sort(key=lambda x: x[0], reverse=True)
+
+            for ts, query_id, query_data in pending:
+                # Mark as processing immediately to prevent re-picking on next poll
+                self._in_flight.add(query_id)
+                get_db().child(DB_QUERIES_PATH).child(query_id).update({"status": "processing"})
+
+                # Dispatch to its own thread — the semaphore inside will serialise
+                # actual model inference so only 1 runs at a time on CPU
+                worker = threading.Thread(
+                    target=self._run_query_thread,
+                    args=(query_id, query_data),
+                    daemon=True,
+                    name=f"QW-{query_id[:8]}",
+                )
+                worker.start()
 
         except Exception as e:
             err_str = str(e)
             if "initialize_app()" in err_str:
                 time.sleep(10)
             else:
-                # Re-raise so _poll_loop can classify it (JWT vs other)
                 raise
 
+    def _run_query_thread(self, query_id: str, query_data: dict):
+        """Run one query: wait for the inference semaphore, then process it."""
+        # Each thread gets its own event loop for async pipelines
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            # ── Serialise model inference: only 1 query runs at a time on CPU ──
+            print(f"  [WAIT] {query_id[:12]} waiting for inference slot...")
+            with self._inference_sem:
+                print(f"  [RUN]  {query_id[:12]} acquired inference slot")
+                # Pass the loop so agent/CNN pipelines can use it
+                self._handle_query(query_id, query_data, loop)
+        finally:
+            self._in_flight.discard(query_id)
+            loop.close()
 
-    def _handle_query(self, query_id: str, query_data: dict):
+
+    def _handle_query(self, query_id: str, query_data: dict, loop: asyncio.AbstractEventLoop):
         """Dispatch to the correct pipeline based on task type."""
         import threading as _th
         task = query_data.get("task", "vqa")
         question = str(query_data.get('question', ''))[:50]
         print(f"  [IN]  Query {query_id} | task={task} | '{question}'")
         t_dispatch = time.time()
-
-        # Mark as processing
-        get_db().child(DB_QUERIES_PATH).child(query_id).update({"status": "processing"})
 
         try:
             image = self._load_image(query_data)
@@ -189,15 +287,13 @@ class FirebaseListener:
         # Heartbeat: keep writing to RTDB so frontend knows backend is alive
         _stop_hb = _th.Event()
         def _heartbeat():
-            n = 0
             while not _stop_hb.wait(30):
-                n += 1
                 elapsed = int(time.time() - t_dispatch)
                 try:
                     get_db().child(DB_QUERIES_PATH).child(query_id).update(
                         {"heartbeat": elapsed, "status": "processing"}
                     )
-                    print(f"  [HB]  {query_id} still running ({elapsed}s elapsed)")
+                    print(f"  [HB]  {query_id[:12]} still running ({elapsed}s elapsed)")
                 except Exception:
                     pass
         _hb_thread = _th.Thread(target=_heartbeat, daemon=True)
@@ -205,26 +301,37 @@ class FirebaseListener:
 
         try:
             if task == "agent":
-                self._handle_agent(query_id, query_data, image, task)
+                self._handle_agent(query_id, query_data, image, task, loop)
             elif task == "cnn":
-                self._handle_cnn(query_id, query_data, image, task)
+                self._handle_cnn(query_id, query_data, image, task, loop)
             else:
                 self._handle_vlm(query_id, query_data, image, task)
-            print(f"  [OK]  Query {query_id} done in {time.time()-t_dispatch:.1f}s")
+            print(f"  [OK]  Query {query_id[:12]} done in {time.time()-t_dispatch:.1f}s")
         except Exception as e:
-            print(f"  [ERR] Query {query_id} failed after {time.time()-t_dispatch:.1f}s: {e}")
+            print(f"  [ERR] Query {query_id[:12]} failed after {time.time()-t_dispatch:.1f}s: {e}")
             self._write_error(query_id, task, str(e))
         finally:
             _stop_hb.set()
 
+
     # ─── VLM pipeline ─────────────────────────────────────────────────────────
 
     def _handle_vlm(self, query_id, query_data, image, task):
-        """Handle VQA / caption / refer tasks via Qwen2.5-VL."""
+        """Handle VQA / caption / refer tasks.
+
+        CPU mode (no GPU):
+          ALL queries use YOLO-based analysis (~0.5 s per query).
+          - Object/count queries  → YOLO counts + bboxes
+          - Scene/description     → structured scene summary from YOLO detections
+          - Caption               → YOLO scene summary
+          - No VLM calls on CPU (VLM takes 90+ s per query on CPU)
+
+        GPU mode:
+          Full VLM (Qwen2.5-VL) inference with bounding-box detection on top.
+        """
         question = query_data.get("question", "")
 
         if not self.model_manager.is_loaded:
-            # Model not loaded — return an informative stub response
             print(f"  [WARN] Model not loaded yet for {query_id}; returning stub.")
             payload = {
                 "answer":       "Model is still loading. Please retry in 60 seconds.",
@@ -238,41 +345,71 @@ class FirebaseListener:
 
         bboxes = []
         bbox_object = None
+        has_gpu = (self.model_manager._device is not None and
+                   "cuda" in str(self.model_manager._device))
 
-        if task == "caption":
-            result = self.model_manager.generate_caption(image)
-            answer = result["caption"]
-            confidence = result["confidence"]
+        # Classify the query
+        obj_label = self._detect_object_keyword(question)
+        is_count  = self._is_counting_query(question)
+        is_object_query = obj_label is not None
 
-        elif task == "refer":
-            expr = query_data.get("expression", question)
-            result = self.model_manager.locate_object(image, expr)
-            answer = str(result["bbox"]) if result["bbox"] else result["raw_output"]
-            confidence = result["confidence"]
+        # ════════════════════════════════════════════════════════════
+        # SMART ROUTING: decide CPU vs GPU per query
+        #   Fast path (YOLO/CPU):  counting + object detection queries
+        #   Deep path (VLM/GPU):   captions, scene description, reasoning
+        # ════════════════════════════════════════════════════════════
+        use_fast_path = (is_count or is_object_query) and task == "vqa"
 
-        else:  # vqa (default)
-            obj_label = self._detect_object_keyword(question)
-            is_count  = self._is_counting_query(question)
+        if not has_gpu:
+            # No GPU at all — everything goes through YOLO
+            use_fast_path = True
 
-            # Always run VQA first (works on both CPU and GPU)
-            vqa_result = self.model_manager.answer_vqa(image, question)
-            answer     = vqa_result["answer"]
-            confidence = vqa_result["confidence"]
-
-            # Try bounding-box detection (works on both CPU and GPU,
-            # but skipped if no matching object keyword in query)
-            if is_count and obj_label:
-                try:
-                    detect_result = self.model_manager.detect_objects(image, obj_label)
-                    if detect_result.get("bboxes"):
-                        bboxes = detect_result["bboxes"]
-                        bbox_object = obj_label
-                except Exception as det_err:
-                    print(f"  Detection skipped: {det_err}")
+        if use_fast_path:
+            # ── FAST PATH (CPU / YOLO) ─────────────────────────────
+            route = "YOLO/CPU"
+            answer, confidence, bboxes, bbox_object = self._yolo_answer(
+                image, question, task
+            )
+        else:
+            # ── DEEP PATH (GPU / VLM) ──────────────────────────────
+            if not has_gpu:
+                # Fallback: no GPU, YOLO already handled above
+                route = "YOLO/CPU-fallback"
+                answer, confidence, bboxes, bbox_object = self._yolo_answer(
+                    image, question, task
+                )
+            elif task == "caption":
+                route = "VLM/GPU"
+                answer, confidence = self._run_vlm_with_timeout(
+                    lambda: self.model_manager.generate_caption(image),
+                    result_key="caption",
+                )
+            elif task == "refer":
+                route = "VLM/GPU"
+                expr = query_data.get("expression", question)
+                answer, confidence = self._run_vlm_with_timeout(
+                    lambda: self.model_manager.locate_object(image, expr),
+                    result_key="raw_output",
+                )
+            else:
+                route = "VLM/GPU"
+                answer, confidence = self._run_vlm_with_timeout(
+                    lambda: self.model_manager.answer_vqa(image, question),
+                    result_key="answer",
+                )
+                # Also overlay bounding-box detection for object queries
+                if is_object_query and obj_label:
+                    try:
+                        detect_result = self.model_manager.detect_objects(image, obj_label)
+                        if detect_result.get("bboxes"):
+                            bboxes = detect_result["bboxes"]
+                            bbox_object = obj_label
+                    except Exception as det_err:
+                        print(f"  Detection skipped: {det_err}")
 
         payload = {
             "answer":       answer,
-            "confidence":   round(confidence, 3),
+            "confidence":   round(float(confidence), 3),
             "task":         task,
             "processed_at": int(time.time() * 1000),
         }
@@ -282,11 +419,204 @@ class FirebaseListener:
 
         get_db().child(DB_RESULTS_PATH).child(query_id).set(payload)
         get_db().child(DB_QUERIES_PATH).child(query_id).update({"status": "done"})
-        print(f"  [OK] VLM done {query_id}: '{answer[:60]}'")
+        print(f"  [OK] {route} done {query_id}: '{answer[:60]}'")
+
+    # ─── VLM timeout helper ────────────────────────────────────────────────────
+
+    def _run_vlm_with_timeout(
+        self, fn, result_key: str = "answer", timeout_s: int = 90
+    ) -> tuple[str, float]:
+        """Run a VLM callable in a thread with a hard timeout.
+
+        Args:
+            fn:         Zero-arg callable that returns a dict with at least
+                        result_key and 'confidence' keys.
+            result_key: Dict key to extract the text answer from.
+            timeout_s:  Hard wall-clock timeout in seconds (default 90s).
+
+        Returns:
+            (answer_str, confidence_float)
+        """
+        import threading as _thr
+        result_holder: list = []
+        exc_holder:    list = []
+
+        def _worker():
+            try:
+                result_holder.append(fn())
+            except Exception as e:
+                exc_holder.append(e)
+
+        t = _thr.Thread(target=_worker, daemon=True)
+        t.start()
+        t.join(timeout=timeout_s)
+
+        if t.is_alive():
+            # Thread is still running — VLM timed out
+            print(f"  [TIMEOUT] VLM inference exceeded {timeout_s}s — returning error")
+            return (
+                f"The AI model did not respond within {timeout_s} seconds on CPU. "
+                f"This image/query combination is too complex for CPU inference. "
+                f"Please try a simpler query (e.g. 'describe this image') or restart "
+                f"the backend with GPU support.",
+                0.0,
+            )
+
+        if exc_holder:
+            err = str(exc_holder[0])
+            print(f"  [ERR] VLM inference raised: {err}")
+            return f"Model error: {err}", 0.0
+
+        if not result_holder:
+            return "Model returned no result.", 0.0
+
+        res = result_holder[0]
+        answer     = str(res.get(result_key, res.get("answer", "No answer returned.")))
+        confidence = float(res.get("confidence", 0.75))
+        return answer, confidence
+
+    # ─── YOLO-based answer generator (CPU mode) ────────────────────────────────
+
+    def _yolo_answer(
+        self, image, question: str, task: str
+    ) -> tuple[str, float, list, str | None]:
+        """Generate an answer using only YOLO — no VLM. Used on CPU.
+
+        Handles all query types:
+          - Object/count queries  → YOLO count + bboxes
+          - Scene/description     → structured summary of all detected objects
+          - Caption               → same as scene summary
+
+        Returns:
+            (answer, confidence, bboxes, bbox_object)
+        """
+        from CNN.yolo_detector import yolo_detector
+
+        q = question.lower().strip()
+        obj_label = self._detect_object_keyword(question)
+
+        try:
+            yolo_result = yolo_detector.detect(image)
+        except Exception as e:
+            print(f"  [YOLO] detect() failed: {e}")
+            return (
+                f"Object detection failed on CPU: {e}. "
+                f"Please try again or use Agent mode.",
+                0.0, [], None
+            )
+
+        counts   = yolo_result.object_counts   # e.g. {"Vehicle": 3, "Person": 1}
+        total    = yolo_result.total_count
+        conf_avg = yolo_result.confidence or 0.5
+        dets     = yolo_result.detections
+
+        # ── YOLO label mapping (object keyword → COCO/satellite labels) ──────────
+        # YOLOv8n on COCO-80: class 4 = "airplane" but satellite images are
+        # typically overhead, so COCO airplane class rarely fires. We still try.
+        YOLO_LABEL_MAP: dict[str, list[str]] = {
+            "airplane":     ["airplane", "aircraft", "Airplane", "Aircraft"],
+            "car":          ["vehicle", "car", "Vehicle", "Car"],
+            "ship":         ["vessel", "ship", "boat", "Vessel", "Ship", "Boat"],
+            "building":     ["building", "Building"],
+            "truck":        ["truck", "Truck"],
+            "storage tank": ["storage tank", "Storage Tank"],
+            "bridge":       ["bridge", "Bridge"],
+            "person":       ["person", "Person"],
+        }
+
+        bboxes: list = []
+        bbox_object: str | None = None
+
+        # ── Object / count query ───────────────────────────────────────────────
+        if obj_label:
+            yolo_labels = YOLO_LABEL_MAP.get(obj_label, [obj_label])
+            matching = [
+                d for d in dets
+                if any(yl.lower() in d.label.lower() for yl in yolo_labels)
+            ]
+            count = len(matching)
+            bboxes = [d.bbox_norm for d in matching]
+            bbox_object = obj_label
+
+            if count > 0:
+                answer = (
+                    f"There {'is' if count == 1 else 'are'} {count} "
+                    f"{obj_label}{'s' if count != 1 else ''} detected in this image."
+                )
+                confidence = conf_avg if conf_avg > 0 else 0.7
+            else:
+                # Object not found — report what WAS found
+                if counts:
+                    found_str = ", ".join(
+                        f"{v} {k.lower()}{'s' if v != 1 else ''}"
+                        for k, v in counts.items()
+                    )
+                    answer = (
+                        f"No {obj_label}s were detected. "
+                        f"The image contains: {found_str}. "
+                        f"Note: aircraft, buildings, and storage tanks are outside "
+                        f"the base detector's scope — use Agent mode for those."
+                    )
+                else:
+                    answer = (
+                        f"No {obj_label}s detected. The scene appears to contain no "
+                        f"recognisable objects at the current detection threshold."
+                    )
+                confidence = 0.5
+
+            print(f"  [YOLO] '{obj_label}': found {count} | conf={confidence:.2f}")
+            return answer, confidence, bboxes, bbox_object
+
+        # ── Scene / description / caption query (no specific object) ─────────
+        # Build a structured description from everything YOLO found
+        if total == 0:
+            answer = (
+                "No objects were detected in this image at the current confidence "
+                "threshold (0.25). The scene may be empty, contain very small objects, "
+                "or consist mostly of natural features (water, vegetation, terrain) "
+                "which are not in the detector's object class list. "
+                "For detailed scene description, GPU inference is required."
+            )
+            confidence = 0.3
+        else:
+            # Build count summary
+            summary_parts = [
+                f"{v} {k.lower()}{'s' if v != 1 else ''}"
+                for k, v in counts.items()
+            ]
+            summary = ", ".join(summary_parts)
+
+            # Build a scene context hint from the question
+            q_hints: dict[str, str] = {
+                "water":        "No water bodies were identified (water is not an YOLO object class).",
+                "vegetation":   "Vegetation/greenery is not classified by the object detector.",
+                "building":     "No structures were detected by the base object detector.",
+                "road":         "Road network is not classified by the base object detector.",
+                "color":        "Colour analysis requires GPU vision model inference.",
+                "colour":       "Colour analysis requires GPU vision model inference.",
+            }
+            extra = ""
+            for kw, hint in q_hints.items():
+                if kw in q:
+                    extra = f" {hint}"
+                    break
+
+            answer = (
+                f"Scene analysis (CPU / object detector mode):\n\n"
+                f"**Detected objects:** {summary} ({total} total, "
+                f"avg. confidence {conf_avg:.0%}).\n\n"
+                f"The detector identified {len(counts)} distinct object class(es).{extra}\n\n"
+                f"*Note: Detailed answers to '{question[:80]}' require GPU-accelerated "
+                f"VLM inference. Use Agent mode for richer analysis.*"
+            )
+            confidence = conf_avg if conf_avg > 0 else 0.6
+
+        print(f"  [YOLO-scene] total={total} | conf={confidence:.2f}")
+        return answer, confidence, [], None
 
     # ─── AI Agent pipeline ────────────────────────────────────────────────────
 
-    def _handle_agent(self, query_id, query_data, image, task):
+    def _handle_agent(self, query_id, query_data, image, task, loop: asyncio.AbstractEventLoop):
         """Handle full AI Agent pipeline -- writes to /agent_results/."""
         question = query_data.get("question", "")
 
@@ -318,13 +648,37 @@ class FirebaseListener:
 
         sat_agent = agent_mod.sat_agent
 
-        print(f"  [Agent] Starting pipeline for {query_id}...")
+        print(f"  [Agent] Starting pipeline for {query_id[:12]}...")
         try:
-            # Run the async agent pipeline in our dedicated event loop
-            report = self._loop.run_until_complete(
-                sat_agent.run(image, question)
+            # Hard 4-minute timeout — guarantees Firebase always gets a result.
+            # On CPU (verifier reruns disabled) YOLO-only queries finish in < 60s.
+            # Hybrid queries with one VLM call typically finish in 2-3 min on CPU.
+            report = loop.run_until_complete(
+                asyncio.wait_for(sat_agent.run(image, question), timeout=240)
             )
             rd = report.to_dict()
+        except asyncio.TimeoutError:
+            print(f"  [Agent] Pipeline TIMED OUT after 4 min for {query_id[:12]}")
+            error_payload = {
+                "summary":          "Analysis timed out after 4 minutes on CPU. "
+                                    "Try a simpler query (e.g. detection-only) or "
+                                    "enable GPU inference for longer analyses.",
+                "vlm_answer":       None,
+                "object_counts":    {},
+                "total_detections": 0,
+                "bboxes":           [],
+                "land_cover":       {},
+                "confidence":       0.0,
+                "tools_used":       [],
+                "routing_mode":     "timeout",
+                "errors":           ["Pipeline timed out after 240 seconds on CPU."],
+                "duration_ms":      240000.0,
+                "question":         question,
+                "processed_at":     int(time.time() * 1000),
+            }
+            get_db().child(DB_AGENT_PATH).child(query_id).set(error_payload)
+            get_db().child(DB_QUERIES_PATH).child(query_id).update({"status": "done"})
+            return
         except Exception as agent_err:
             print(f"  [Agent] Pipeline error: {agent_err}")
             # Write a graceful partial result so frontend gets something back
@@ -383,14 +737,14 @@ class FirebaseListener:
 
     # ─── CNN pipeline ─────────────────────────────────────────────────────────
 
-    def _handle_cnn(self, query_id, query_data, image, task):
+    def _handle_cnn(self, query_id, query_data, image, task, loop: asyncio.AbstractEventLoop):
         """Handle CNN-only pipeline (detect + segment) -- writes to /cnn_results/."""
         tasks_param = query_data.get("cnn_tasks", ["detect", "segment"])
         conf_threshold = float(query_data.get("conf_threshold", 0.25))
 
         from CNN.cnn_pipeline import cnn_pipeline
 
-        result = self._loop.run_until_complete(
+        result = loop.run_until_complete(
             cnn_pipeline.run(image, tasks=tasks_param, conf_threshold=conf_threshold)
         )
         rd = result.to_dict()

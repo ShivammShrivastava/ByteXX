@@ -4,10 +4,14 @@ AI Agents/verifier.py — Confidence Verifier
 Checks each tool result's confidence score and triggers
 additional analysis for low-confidence outputs.
 
-Strategy:
+Strategy (GPU only):
   - Low-confidence YOLO detection  → re-run with Qwen2.5-VL detect
   - Low-confidence VLM answer      → re-run with a refined prompt
   - Both still low                 → flag as uncertain in final report
+
+CPU mode: re-analysis is DISABLED — a single VLM re-run on CPU takes
+2–5 extra minutes and blocks the Firebase response.  Low-confidence
+results are flagged as uncertain in the summary instead.
 
 Threshold: LOW_CONFIDENCE_THRESHOLD = 0.45
 """
@@ -19,6 +23,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
+import torch
 from PIL import Image
 
 from AI_Agents.executor import StepExecutionRecord
@@ -29,6 +34,10 @@ logger = logging.getLogger(__name__)
 # ─── Configuration ────────────────────────────────────────────────────────────
 LOW_CONFIDENCE_THRESHOLD = 0.45
 MAX_REVERIFICATION_ROUNDS = 1    # prevent infinite loops
+
+# On CPU, re-running the VLM for verification is prohibitively slow (2-5 min
+# per call). Disable verification reruns entirely on CPU-only machines.
+_ON_CPU = not torch.cuda.is_available()
 
 
 @dataclass
@@ -108,7 +117,21 @@ class Verifier:
                 verification_logs.append(vlog)
                 continue
 
-            # ── Low confidence — trigger additional analysis ──────────────────
+            # ── Low confidence ────────────────────────────────────────────────
+            if _ON_CPU:
+                # Re-analysis is disabled on CPU — a single VLM re-run takes
+                # 2–5 extra minutes on CPU and would block the Firebase response.
+                # Just flag the result as uncertain instead.
+                vlog.verification_note = (
+                    f"CPU mode: confidence {conf:.1%} is low but re-analysis skipped "
+                    f"to avoid timeout. Result may be uncertain."
+                )
+                record.result.metadata["uncertain"] = True
+                record.result.metadata["verification_note"] = vlog.verification_note
+                verification_logs.append(vlog)
+                continue
+
+            # ── GPU: trigger additional analysis ──────────────────────────────
             logger.info(
                 f"  [verifier] Low confidence {conf:.3f} for {record.step.tool} "
                 f"(step {record.step.index}) — triggering re-analysis."

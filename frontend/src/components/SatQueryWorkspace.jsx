@@ -125,17 +125,19 @@ const PRESET_DATASETS = [
 const STATUS_STEPS = {
   encoding:    { label: 'Encoding image…',          icon: 'spinner',    color: '#6366f1' },
   pending:     { label: 'Queued for analysis…',      icon: 'clock',      color: '#f59e0b' },
-  processing:  { label: 'Qwen VLM analyzing… (may take 1-2 min on CPU)', icon: 'spinner', color: '#0ea5e9' },
+  processing:  { label: 'AI model analyzing… (CPU inference active)', icon: 'spinner', color: '#0ea5e9' },
+  waiting:     { label: 'Still processing on CPU — result will appear automatically', icon: 'clock', color: '#f59e0b' },
   done:        { label: 'Analysis complete',                               icon: 'check',   color: '#10b981' },
   error:       { label: 'Analysis failed',                                 icon: 'error',   color: '#ef4444' },
   timeout:     { label: 'Backend not responding — CPU inference may still be running', icon: 'error', color: '#f97316' },
 };
 
 // ─── Pipeline timeout (ms) ────────────────────────────────────────────────────
-// CPU inference: Qwen-3B generates ~2 tok/s on CPU.
-// 128 tokens = ~64s + image preprocessing ≈ 90-120s total.
-// Give 10 minutes (600s) so CPU users don't see false timeouts.
-const RESULT_TIMEOUT_MS = 600_000; // 10 minutes (covers CPU inference)
+// CPU inference: Qwen-3B on CPU takes 5-10 minutes per query.
+// Give 20 minutes before even showing the soft 'still waiting' banner.
+// The Firebase listener stays alive indefinitely — result arrives when ready.
+const RESULT_TIMEOUT_MS = 1_200_000; // 20 minutes hard timeout
+const SOFT_TIMEOUT_MS   =   300_000; // 5 minutes → switch to 'waiting' status (listener stays open)
 
 // ─── Object keywords that trigger per-instance detection boxes ───────────────
 const OBJECT_KEYWORDS = [
@@ -1080,10 +1082,29 @@ export default function SatQueryWorkspace({ user, onLogout }) {
     const qLower      = query.toLowerCase();
     const isBiTemporal = images.length >= 2 && (qLower.includes('change') || qLower.includes('dates') || qLower.includes('between'));
     const isCrossModal = images.some(img => img.modality?.includes('SAR')) || (qLower.includes('sar') && qLower.includes('optical'));
-    if (isBiTemporal) return { taskType: 'bitemporal', taskName: 'Change Detection & VQA',      modelName: 'Qwen2.5-VL-3B-RS + ChangeSiam', fbTask: 'vqa' };
-    if (isCrossModal) return { taskType: 'crossmodal', taskName: 'Optical-SAR Joint Extraction', modelName: 'Qwen2.5-VL-3B-RS + FusionNet',  fbTask: 'vqa' };
-    return               { taskType: 'single',     taskName: 'Single-Image VQA & Grounding', modelName: 'Qwen2.5-VL-3B-RS',              fbTask: 'vqa' };
+
+    // Mirror backend router logic — route to agent for complex/mixed queries
+    const hasCount   = ['how many','count','number of','total','aircraft','airplane','plane','jet',
+                        'helicopter','vehicle','car','truck','ship','vessel','boat','building',
+                        'structure','person','people','bridge','tank'].some(k => qLower.includes(k));
+    const hasSegment = ['vegetation','forest','canopy','tree','water','river','lake','urban',
+                        'built-up','city','agricultural','farmland','crop','land cover','land use',
+                        'density','percentage','percent','coverage','how much','area','fraction',
+                        'industrial','industrial area','settlement'].some(k => qLower.includes(k));
+    const hasVlm     = ['describe','explain','analyze','what is','why','caption','tell me',
+                        'summarize','assess','identify','detail','feature','change','compare',
+                        'location','locate','where'].some(k => qLower.includes(k));
+
+    // Use agent pipeline for anything non-trivial
+    const useAgent = hasCount || hasSegment || (hasVlm && (hasCount || hasSegment)) ||
+                     isBiTemporal || isCrossModal;
+
+    if (isBiTemporal) return { taskType: 'bitemporal', taskName: 'Change Detection & VQA',      modelName: 'Qwen2.5-VL-3B-RS + ChangeSiam', fbTask: 'agent' };
+    if (isCrossModal) return { taskType: 'crossmodal', taskName: 'Optical-SAR Joint Extraction', modelName: 'Qwen2.5-VL-3B-RS + FusionNet',  fbTask: 'agent' };
+    if (useAgent)     return { taskType: 'agent',      taskName: 'AI Agent Analysis',            modelName: 'SatAgent (CNN + VLM)',           fbTask: 'agent' };
+    return               { taskType: 'single',     taskName: 'Single-Image VQA & Grounding', modelName: 'Qwen2.5-VL-3B-RS',              fbTask: 'vqa'   };
   };
+
 
   // ─── Build result payload from Firebase answer ────────────────────────────
   const buildResultPayload = (fbData, taskInfo) => ({
@@ -1213,14 +1234,22 @@ export default function SatQueryWorkspace({ user, onLogout }) {
 
       unsubListenerRef.current = unsubAgent;
 
-      // Timeout guard — CPU inference takes 4-8 min for full agent pipeline
-      // (CNN detect + segment + Qwen VLM = multiple slow CPU passes)
+      // Soft timeout (5 min) — switch to 'still waiting' but keep listener alive
+      // so the result auto-arrives when backend finishes (even after 9-10 min).
+      const softTimer = setTimeout(() => {
+        setQueryStatus('waiting');
+        setIsAgentAnalyzing(false); // unblock the UI; result arrives on its own
+      }, SOFT_TIMEOUT_MS);
+
+      // Hard timeout (20 min) — only fires if backend truly never responds
       timeoutRef.current = setTimeout(() => {
+        clearTimeout(softTimer);
         unsubAgent();
-        setQueryError('Analysis timed out. On CPU, the AI Agent pipeline (CNN + VLM) can take up to 10 minutes. Your query is still being processed in the backend — try refreshing in 2-3 minutes.');
+        setQueryError('Analysis timed out after 20 minutes. Check if the backend is still running.');
         setQueryStatus('timeout');
         setIsAgentAnalyzing(false);
       }, RESULT_TIMEOUT_MS);
+
 
     } catch (err) {
       setQueryError(`Agent analysis failed: ${err.message}`);
@@ -1245,75 +1274,181 @@ export default function SatQueryWorkspace({ user, onLogout }) {
     const taskInfo = detectTaskType(currentQuery, uploadedImages);
     const primaryFile = uploadedFiles[0] || null;
 
-    // ── If preset (no raw file), run demo mode ────────────────────────────
-    if (!primaryFile) {
-      setQueryStatus('pending');
-      await _runDemoMode(taskInfo);
+    // ── Encode image: use raw file if available, else fetch preset URL ────────
+    let imageBase64;
+    try {
+      setQueryStatus('encoding');
+      if (primaryFile) {
+        imageBase64 = await fileToBase64(primaryFile, 1024);
+      } else if (uploadedImages[0]?.url) {
+        // Preset/sample image — fetch URL and encode to base64
+        const resp = await fetch(uploadedImages[0].url);
+        const blob = await resp.blob();
+        imageBase64 = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload  = () => resolve(reader.result.split(',')[1]);
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+      } else {
+        setQueryStatus('error');
+        setQueryError('No image provided.');
+        setIsAnalyzing(false);
+        return;
+      }
+    } catch (encErr) {
+      setQueryStatus('error');
+      setQueryError(`Image encoding failed: ${encErr.message}`);
+      setIsAnalyzing(false);
       return;
     }
 
     // ── Real pipeline via Firebase RTDB (base64 — no Storage needed) ──────
     try {
-      // Step 1 — Encode image to base64 (resized to ≤1024px, JPEG 85%)
-      setQueryStatus('encoding');
-      const imageBase64 = await fileToBase64(primaryFile, 1024);
-
       // Step 2 — Write query + base64 image to RTDB
       setQueryStatus('pending');
-      const queryId = await submitQueryToFirebase(
-        user?.uid || 'anonymous',
-        imageBase64,
-        currentQuery || 'Describe this satellite image.',
-        taskInfo.fbTask
-      );
 
+      // ── Agent path (complex/mixed queries) ───────────────────────────────
+      if (taskInfo.fbTask === 'agent') {
+        const queryId = await submitAgentQueryToFirebase(
+          user?.uid || 'anonymous',
+          imageBase64,
+          currentQuery || 'Analyze this satellite image.',
+          0.25,
+        );
 
-      // Step 3 — Listen for result
-      const unsub = listenForQueryResult(queryId, {
-        onStatusChange: (status) => {
-          if (status && status !== 'done' && status !== 'error') {
-            setQueryStatus(status);
-          }
-        },
-        onResult: async (fbData) => {
-          clearTimeout(timeoutRef.current);
-          unsubListenerRef.current?.();
-          setQueryStatus('done');
+        setQueryStatus('processing');
 
-          const resultPayload = buildResultPayload(fbData, taskInfo);
-          setAnalysisResult(resultPayload);
-          setIsAnalyzing(false);
+        const unsubAgent = listenForAgentResult(queryId, {
+          onStatusChange: (status) => {
+            if (status && status !== 'done' && status !== 'error') setQueryStatus(status);
+          },
+          onResult: (data) => {
+            clearTimeout(timeoutRef.current);
+            unsubAgent();
+            unsubListenerRef.current = null;
 
-          // Save to recents
-          if (user?.uid) {
-            await saveRecentQuery(user.uid, {
-              id:        `query_${Date.now()}`,
-              title:     resultPayload.title,
-              query:     currentQuery,
-              taskType:  taskInfo.taskType,
-              images:    uploadedImages.map(img => ({ name: img.name, modality: img.modality, url: img.url })),
-              result:    resultPayload,
-              timestamp: Date.now(),
-            });
-          }
-        },
-        onError: (errMsg) => {
-          clearTimeout(timeoutRef.current);
-          setQueryStatus('error');
-          setQueryError(errMsg || 'Unknown error from backend.');
-          setIsAnalyzing(false);
-        },
-      });
-      unsubListenerRef.current = unsub;
+            const report = {
+              summary:             data.summary             || '',
+              vlm_answer:          data.vlm_answer          || null,
+              caption:             data.caption             || null,
+              object_counts:       data.object_counts       || {},
+              total_detections:    data.total_detections    || 0,
+              bboxes:              data.bboxes              || [],
+              bbox_labels:         data.bbox_labels         || [],
+              bbox_confidences:    data.bbox_confidences    || [],
+              annotated_image_b64: data.annotated_image_b64 || null,
+              land_cover:          data.land_cover          || {},
+              land_cover_display:  data.land_cover_display  || {},
+              dominant_land_cover: data.dominant_land_cover || '',
+              mask_image_b64:      data.mask_image_b64      || null,
+              confidence:          data.confidence          || 0,
+              tools_used:          data.tools_used          || [],
+              routing_mode:        data.routing_mode        || '',
+              execution_steps:     data.execution_steps     || [],
+              verification_log:    data.verification_log    || [],
+              reasoning_trace:     data.reasoning_trace     || '',
+              errors:              data.errors              || [],
+              duration_ms:         data.duration_ms         || 0,
+            };
 
-      // Step 4 — Timeout guard
+            setAgentReport(report);
+            setActiveTab('agent');
+            setQueryStatus('done');
+            setIsAnalyzing(false);
+
+            if (user?.uid) {
+              saveRecentQuery(user.uid, {
+                id: queryId,
+                title: currentQuery.length > 40 ? currentQuery.slice(0, 40) + '…' : currentQuery,
+                query: currentQuery,
+                taskType: 'agent',
+                timestamp: Date.now(),
+                images: uploadedImages.map(i => ({ ...i, url: i.url })),
+              });
+            }
+          },
+          onError: (msg) => {
+            clearTimeout(timeoutRef.current);
+            setQueryError(`Agent listener error: ${msg}`);
+            setQueryStatus('error');
+            setIsAnalyzing(false);
+          },
+        });
+        unsubListenerRef.current = unsubAgent;
+
+      } else {
+        // ── VQA path (simple single-image questions) ───────────────────────
+        const queryId = await submitQueryToFirebase(
+          user?.uid || 'anonymous',
+          imageBase64,
+          currentQuery || 'Describe this satellite image.',
+          taskInfo.fbTask
+        );
+
+        // Step 3 — Listen for result
+        const unsub = listenForQueryResult(queryId, {
+          onStatusChange: (status) => {
+            if (!status) return;
+            if (status === 'error') {
+              // Backend wrote error to /queries/ — reflect immediately
+              clearTimeout(timeoutRef.current);
+              unsub();
+              unsubListenerRef.current = null;
+              setQueryStatus('error');
+              setQueryError('The backend reported an error processing this query. Please retry.');
+              setIsAnalyzing(false);
+            } else if (status !== 'done') {
+              setQueryStatus(status);
+            }
+          },
+          onResult: async (fbData) => {
+            clearTimeout(timeoutRef.current);
+            unsubListenerRef.current?.();
+            setQueryStatus('done');
+
+            const resultPayload = buildResultPayload(fbData, taskInfo);
+            setAnalysisResult(resultPayload);
+            setIsAnalyzing(false);
+
+            // Save to recents
+            if (user?.uid) {
+              await saveRecentQuery(user.uid, {
+                id:        `query_${Date.now()}`,
+                title:     resultPayload.title,
+                query:     currentQuery,
+                taskType:  taskInfo.taskType,
+                images:    uploadedImages.map(img => ({ name: img.name, modality: img.modality, url: img.url })),
+                result:    resultPayload,
+                timestamp: Date.now(),
+              });
+            }
+          },
+          onError: (errMsg) => {
+            clearTimeout(timeoutRef.current);
+            setQueryStatus('error');
+            setQueryError(errMsg || 'Unknown error from backend.');
+            setIsAnalyzing(false);
+          },
+        });
+        unsubListenerRef.current = unsub;
+      }
+
+      // Step 4 — Two-stage timeout
+      // Soft (5 min): switch to 'waiting' status, unblock UI, but keep Firebase
+      // listener alive so result auto-arrives when backend finishes (even at 9-10 min)
+      const softTimer2 = setTimeout(() => {
+        setQueryStatus('waiting');
+        setIsAnalyzing(false);
+      }, SOFT_TIMEOUT_MS);
+
+      // Hard (20 min): only fires if backend truly never responds
       timeoutRef.current = setTimeout(() => {
+        clearTimeout(softTimer2);
         unsubListenerRef.current?.();
-        if (queryStatus !== 'done') {
-          setQueryStatus('timeout');
-          setQueryError('The backend did not respond in time. Make sure it is running and Firebase is connected.');
-          setIsAnalyzing(false);
-        }
+        setQueryStatus('timeout');
+        setQueryError('The backend did not respond in 20 minutes. Make sure it is running and Firebase is connected.');
+        setIsAnalyzing(false);
       }, RESULT_TIMEOUT_MS);
 
     } catch (err) {
@@ -1323,6 +1458,7 @@ export default function SatQueryWorkspace({ user, onLogout }) {
       setIsAnalyzing(false);
     }
   };
+
 
   // ─── Demo / preset mode (no real file uploaded) ───────────────────────────
   const _runDemoMode = async (taskInfo) => {
