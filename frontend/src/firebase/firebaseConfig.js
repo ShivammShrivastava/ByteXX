@@ -25,14 +25,7 @@ import {
 
 // ✅ Real Firebase configuration — satellite-efa0a (ByteX project)
 export const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyDJtjpV4DpD-Ev0BeRJDsfZV4k5U63dpW4",
-  authDomain: "satellite-efa0a.firebaseapp.com",
-  databaseURL: "https://satellite-efa0a-default-rtdb.firebaseio.com",
-  projectId: "satellite-efa0a",
-  storageBucket: "satellite-efa0a.firebasestorage.app",
-  messagingSenderId: "504899672780",
-  appId: "1:504899672780:web:4f61a1b212930752cdc069",
-  measurementId: "G-TY956H2RJF"
+  
 };
 
 let app, auth, db;
