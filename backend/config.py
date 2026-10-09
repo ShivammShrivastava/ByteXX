@@ -11,7 +11,7 @@ import os
 # ─────────────────────────────────────────────
 # This tells transformers to use the locally downloaded model
 # instead of downloading from the internet.
-_HF_HOME = os.environ.get("HF_HOME", r"C:\Users\Suryansh\OneDrive\Desktop\huggingface")
+_HF_HOME = os.environ.get("HF_HOME", r"")
 os.environ.setdefault("HF_HOME", _HF_HOME)
 os.environ.setdefault("TRANSFORMERS_CACHE", os.path.join(_HF_HOME, "hub"))
 os.environ.setdefault("HUGGINGFACE_HUB_CACHE", os.path.join(_HF_HOME, "hub"))
