@@ -15,21 +15,14 @@ from firebase_admin import credentials, db, storage
 
 # ── Firebase client-side config (matches web app in Firebase Console) ─────────
 FIREBASE_CONFIG = {
-    "apiKey":            "AIzaSyDJtjpV4DpD-Ev0BeRJDsfZV4k5U63dpW4",
-    "authDomain":        "satellite-efa0a.firebaseapp.com",
-    "projectId":         "satellite-efa0a",
-    "storageBucket":     "satellite-efa0a.firebasestorage.app",
-    "messagingSenderId": "504899672780",
-    "appId":             "1:504899672780:web:4f61a1b212930752cdc069",
-    "measurementId":     "G-TY956H2RJF",
-    "databaseURL":       "https://satellite-efa0a-default-rtdb.firebaseio.com",
+   
 }
 
 # ── Service-account key — try new name first, fall back to legacy name ─────────
 _BACKEND_DIR = os.path.dirname(__file__)
 
 _SA_CANDIDATES = [
-    os.path.join(_BACKEND_DIR, "satellite-efa0a-firebase-adminsdk-fbsvc-075fca07b4.json"),
+    os.path.join(_BACKEND_DIR, "),
     os.path.join(_BACKEND_DIR, "serviceAccountKey.json"),
 ]
 
